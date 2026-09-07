@@ -680,7 +680,7 @@ function ReassignModal({job,engineers,jobs,onReassign,onClose}) {
   };
 
   return (
-    <Modal title={`Reassign — Job #${job.id}: ${job.customer}`} onClose={onClose}>
+    <Modal title={`Reassign — Job ${job.bookingRef||('#'+job.id)}: ${job.customer}`} onClose={onClose}>
       <div style={{display:"flex",gap:8,marginBottom:14}}>
         <button type="button" onClick={()=>setMode("inhouse")} style={{flex:1,border:"none",borderRadius:7,padding:"7px 0",fontSize:12,fontWeight:700,cursor:"pointer",fontFamily:"inherit",background:mode==="inhouse"?C.primary:"rgba(255,255,255,0.07)",color:mode==="inhouse"?"#000":C.mid}}>In-house SP</button>
         <button type="button" onClick={()=>setMode("external")} style={{flex:1,border:"none",borderRadius:7,padding:"7px 0",fontSize:12,fontWeight:700,cursor:"pointer",fontFamily:"inherit",background:mode==="external"?C.primary:"rgba(255,255,255,0.07)",color:mode==="external"?"#000":C.mid}}>External SP (one-off)</button>
@@ -1163,7 +1163,7 @@ function mapEngineerRow(row){
 // in one place instead of drifting between read and write paths.
 function mapBookingRow(row){
   return {
-    id: row.id, customer: row.customer, phone: row.phone, email: row.email||"",
+    id: row.id, bookingRef: row.booking_ref||null, customer: row.customer, phone: row.phone, email: row.email||"",
     address: row.address||"", postcode: row.postcode||"",
     appliance: row.appliance, brand: row.brand||"", applianceAge: row.appliance_age??"",
     issue: row.issue||"", preferredCallTime: row.preferred_call_time||"",
@@ -2040,7 +2040,7 @@ export default function App() {
     if(fsStatus!=="All"&&j.status!==fsStatus)return false;
     if(fsEng==="External"&&!j.isExternal)return false;
     else if(fsEng!=="All"&&fsEng!=="External"&&j.engineerId!==fsEng)return false;
-    if(fsSearch&&![j.customer,j.address,String(j.id),j.appliance,j.brand||"",j.postcode||""].some(s=>s.toLowerCase().includes(fsSearch.toLowerCase())))return false;
+    if(fsSearch&&![j.customer,j.address,String(j.id),j.bookingRef||"",j.appliance,j.brand||"",j.postcode||""].some(s=>s.toLowerCase().includes(fsSearch.toLowerCase())))return false;
     return true;
   });
 
@@ -2050,7 +2050,7 @@ export default function App() {
   // Edge Function could also insert rows with status:"Quote" directly.
   const quoteJobs = jobs.filter(j=>j.status==="Quote");
   const filtQuotes = quoteJobs.filter(j=>
-    !qSearch || [j.customer,j.address,String(j.id),j.appliance,j.brand||"",j.postcode||""].some(s=>s.toLowerCase().includes(qSearch.toLowerCase()))
+    !qSearch || [j.customer,j.address,String(j.id),j.bookingRef||"",j.appliance,j.brand||"",j.postcode||""].some(s=>s.toLowerCase().includes(qSearch.toLowerCase()))
   );
 
   // "Today's Schedule" below is about appointments happening today, so it
@@ -2403,7 +2403,7 @@ export default function App() {
                             <input type="checkbox" checked={selectedJobIds.has(j.id)} onChange={()=>toggleJobSelected(j.id)} style={{cursor:"pointer"}} aria-label={`Select booking #${j.id}`}/>
                           </td>
                         )}
-                        <td style={{padding:"9px 13px",fontSize:12,color:C.primary,fontWeight:800}}>#{j.id}</td>
+                        <td style={{padding:"9px 13px",fontSize:12,color:C.primary,fontWeight:800}}>{j.bookingRef||('#'+j.id)}</td>
                         <td style={{padding:"9px 13px"}}><div style={{fontWeight:700,fontSize:13,display:"flex",alignItems:"center",gap:6}}>{j.customer}{j.isTest&&<TestPill/>}</div><div style={{color:C.light,fontSize:10}} title={j.sourceUrl||j.source}>{j.sourceUrl?shortSource(j.sourceUrl):j.source}</div></td>
                         <td style={{padding:"9px 13px",fontSize:12}}>{j.appliance}</td>
                         <td style={{padding:"9px 13px",fontSize:12,fontWeight:600}}>{j.brand||<span style={{color:C.light}}>—</span>}</td>
@@ -2445,7 +2445,7 @@ export default function App() {
                   <tbody>
                     {filtQuotes.length===0?<tr><td colSpan={7} style={{padding:28,textAlign:"center",color:C.light}}>No quotes right now</td></tr>:filtQuotes.map(j=>(
                       <tr key={j.id} style={{borderBottom:`1px solid #262626`}} onMouseOver={e=>e.currentTarget.style.background="#1E2530"} onMouseOut={e=>e.currentTarget.style.background="transparent"}>
-                        <td onClick={()=>setSelJob(j)} style={{padding:"9px 13px",fontSize:12,color:C.primary,fontWeight:800,cursor:"pointer"}}>#{j.id}</td>
+                        <td onClick={()=>setSelJob(j)} style={{padding:"9px 13px",fontSize:12,color:C.primary,fontWeight:800,cursor:"pointer"}}>{j.bookingRef||('#'+j.id)}</td>
                         <td onClick={()=>setSelJob(j)} style={{padding:"9px 13px",cursor:"pointer"}}><div style={{fontWeight:700,fontSize:13,display:"flex",alignItems:"center",gap:6}}>{j.customer}{j.isTest&&<TestPill/>}</div><div style={{color:C.light,fontSize:10}} title={j.sourceUrl||j.source}>{j.sourceUrl?shortSource(j.sourceUrl):j.source}</div></td>
                         <td onClick={()=>setSelJob(j)} style={{padding:"9px 13px",fontSize:12,cursor:"pointer"}}>{j.appliance}</td>
                         <td onClick={()=>setSelJob(j)} style={{padding:"9px 13px",fontSize:12,fontWeight:600,cursor:"pointer"}}>{j.brand||<span style={{color:C.light}}>—</span>}</td>
@@ -2656,7 +2656,7 @@ export default function App() {
                   </div>
                   {p.unpaid.length===0?<div style={{padding:"11px 18px",color:C.success,fontWeight:600,fontSize:12}}>✓ All payments up to date</div>:p.unpaid.map(j=>(
                     <div key={j.id} style={{padding:"9px 18px",borderBottom:`1px solid #262626`,display:"flex",justifyContent:"space-between",alignItems:"center"}}>
-                      <div><span style={{fontWeight:700,fontSize:13}}>#{j.id} {j.customer}</span><span style={{color:C.light,fontSize:11}}> · {j.appliance}{j.brand?` · ${j.brand}`:""} · {fmt(j.completedDate||j.scheduledDate)}</span></div>
+                      <div><span style={{fontWeight:700,fontSize:13}}>{j.bookingRef||('#'+j.id)} {j.customer}</span><span style={{color:C.light,fontSize:11}}> · {j.appliance}{j.brand?` · ${j.brand}`:""} · {fmt(j.completedDate||j.scheduledDate)}</span></div>
                       <div style={{display:"flex",gap:9,alignItems:"center"}}>
                         <span style={{fontWeight:800,color:C.danger}}>£{j.rate}</span>
                         {isOwner&&<Btn onClick={async ()=>{ await supabase.from("bookings").update({paid:true}).eq("id",j.id); await loadBookings(); }} variant="success" sm>Mark Paid</Btn>}
@@ -2665,7 +2665,7 @@ export default function App() {
                   ))}
                   {p.paid.length>0&&<div style={{padding:"9px 18px",background:"#161B22"}}>
                     <div style={{fontSize:9,color:C.light,fontWeight:700,textTransform:"uppercase",marginBottom:5,letterSpacing:.4}}>Payment History</div>
-                    {p.paid.map(j=><div key={j.id} style={{display:"flex",justifyContent:"space-between",fontSize:11,padding:"3px 0",color:C.mid}}><span>#{j.id} {j.customer} · {j.appliance}{j.brand?` · ${j.brand}`:""}</span><span style={{color:C.success,fontWeight:700}}>£{j.rate} ✓</span></div>)}
+                    {p.paid.map(j=><div key={j.id} style={{display:"flex",justifyContent:"space-between",fontSize:11,padding:"3px 0",color:C.mid}}><span>{j.bookingRef||('#'+j.id)} {j.customer} · {j.appliance}{j.brand?` · ${j.brand}`:""}</span><span style={{color:C.success,fontWeight:700}}>£{j.rate} ✓</span></div>)}
                   </div>}
                 </div>
               ))}
@@ -2693,12 +2693,12 @@ export default function App() {
 
       {/* ── MODALS ── */}
       {(showNew||editJob)&&(
-        <Modal title={editJob?`Edit Job #${editJob.id}`:(newDefaultStatus==="Quote"?"New Quote":"New Booking")} onClose={()=>{setShowNew(false);setEditJob(null);}} wide>
+        <Modal title={editJob?`Edit Job ${editJob.bookingRef||('#'+editJob.id)}`:(newDefaultStatus==="Quote"?"New Quote":"New Booking")} onClose={()=>{setShowNew(false);setEditJob(null);}} wide>
           <JobForm initial={editJob} defaultStatus={newDefaultStatus} onSave={saveJob} onCancel={()=>{setShowNew(false);setEditJob(null);}} canEditRate={isOwner} engineers={assignableEngineers} jobs={jobs}/>
         </Modal>
       )}
       {selJob&&!editJob&&!reassign&&(
-        <Modal title={`Job #${selJob.id} — ${selJob.customer}`} onClose={()=>setSelJob(null)} wide>
+        <Modal title={`Job ${selJob.bookingRef||('#'+selJob.id)} — ${selJob.customer}`} onClose={()=>setSelJob(null)} wide>
           <JobDetail job={selJob} onClose={()=>setSelJob(null)} onEdit={()=>{setEditJob(selJob);setSelJob(null);}} onReassign={()=>setReassign(selJob)} onDelete={isOwner?()=>askDeleteJob(selJob):undefined} engineers={engineers}/>
         </Modal>
       )}
