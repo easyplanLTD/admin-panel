@@ -661,7 +661,7 @@ function JobDetail({job,onClose,onEdit,onReassign,onDelete,engineers}) {
 
       {/* Appliance banner */}
       <div style={{background:C.primaryLight,border:`1px solid #BFDBFE`,borderRadius:9,padding:"10px 16px",marginBottom:14,display:"flex",gap:24,flexWrap:"wrap",alignItems:"center"}}>
-        {[["Appliance",job.appliance],["Brand",job.brand||"Unknown"],["Age",(job.applianceAge===""||job.applianceAge==null)?"Unknown":`${job.applianceAge} yr${job.applianceAge!=1?"s":""}`],["Booked",fmtDateTime(job.createdAt)],["Source",job.source]].map(([l,v])=>(
+        {[["Appliance",job.appliance],["Brand",job.brand||"Unknown"],["Age",job.applianceAgeLabel?job.applianceAgeLabel:(job.applianceAge===""||job.applianceAge==null)?"Unknown":`${job.applianceAge} yr${job.applianceAge!=1?"s":""}`],["Booked",fmtDateTime(job.createdAt)],["Source",job.source]].map(([l,v])=>(
           <div key={l}><div style={{fontSize:10,color:C.light,fontWeight:700,textTransform:"uppercase"}}>{l}</div><div style={{fontWeight:700,fontSize:14,color:C.text}}>{v}</div></div>
         ))}
       </div>
@@ -1605,7 +1605,7 @@ function mapBookingRow(row){
   return {
     id: row.id, bookingRef: row.booking_ref||null, customer: row.customer, phone: row.phone, email: row.email||"",
     address: row.address||"", postcode: row.postcode||"",
-    appliance: row.appliance, brand: row.brand||"", applianceAge: row.appliance_age??"",
+    appliance: row.appliance, brand: row.brand||"", applianceAge: row.appliance_age??"", applianceAgeLabel: row.appliance_age_label||null,
     issue: row.issue||"", preferredCallTime: row.preferred_call_time||"",
     source: row.source||"Website", sourceUrl: row.source_url||"", referrerUrl: row.referrer_url||"", status: row.status, engineerId: row.engineer_id,
     // When this came in (existing column, already used to order both the
@@ -3020,7 +3020,7 @@ export default function App() {
                   return <div key={j.id} onClick={()=>setSelJob(j)} style={{padding:"10px 17px",borderBottom:`1px solid #262626`,cursor:"pointer",display:"flex",alignItems:"center",gap:12}} onMouseOver={e=>e.currentTarget.style.background="#1E2530"} onMouseOut={e=>e.currentTarget.style.background="transparent"}>
                     <div style={{fontWeight:800,color:C.primary,fontSize:12,minWidth:42}}>{j.scheduledTime}</div>
                     <div style={{flex:1}}>
-                      <div style={{fontWeight:700,fontSize:13}}>{j.customer} <span style={{color:C.light,fontWeight:400}}>· {j.appliance} · {j.brand||"?"}{(j.applianceAge===""||j.applianceAge==null)?"":` · ${j.applianceAge}yr`}</span></div>
+                      <div style={{fontWeight:700,fontSize:13}}>{j.customer} <span style={{color:C.light,fontWeight:400}}>· {j.appliance} · {j.brand||"?"}{j.applianceAgeLabel?` · ${j.applianceAgeLabel}`:(j.applianceAge===""||j.applianceAge==null)?"":` · ${j.applianceAge}yr`}</span></div>
                       <div style={{color:C.mid,fontSize:11}}>{j.address}</div>
                     </div>
                     <div style={{fontSize:11,color:C.mid}}>{j.isExternal?<>{j.externalName} <span style={{color:C.purple,fontWeight:700}}>(External)</span></>:eng?.name||<span style={{color:C.danger,fontWeight:700}}>Unassigned</span>}</div>
@@ -3117,7 +3117,7 @@ export default function App() {
                         <td style={{padding:"9px 13px"}}><div style={{fontWeight:700,fontSize:13,display:"flex",alignItems:"center",gap:6}}>{j.customer}{j.wantsProtectionPlan&&<ProtectionPlanPill/>}{j.isTest&&<TestPill/>}</div><div style={{color:C.light,fontSize:10}} title={j.sourceUrl||j.source}>{j.sourceUrl?shortSource(j.sourceUrl):j.source}</div></td>
                         <td style={{padding:"9px 13px",fontSize:12}}>{j.appliance}</td>
                         <td style={{padding:"9px 13px",fontSize:12,fontWeight:600}}>{j.brand||<span style={{color:C.light}}>—</span>}</td>
-                        <td style={{padding:"9px 13px",fontSize:12}}>{(j.applianceAge===""||j.applianceAge==null)?<span style={{color:C.light}}>—</span>:`${j.applianceAge}yr`}</td>
+                        <td style={{padding:"9px 13px",fontSize:12}}>{j.applianceAgeLabel?j.applianceAgeLabel:(j.applianceAge===""||j.applianceAge==null)?<span style={{color:C.light}}>—</span>:`${j.applianceAge}yr`}</td>
                         <td style={{padding:"9px 13px",fontSize:11}}>{fmt(j.scheduledDate)}<br/><span style={{color:C.light}}>{j.scheduledTime}</span></td>
                         <td style={{padding:"9px 13px",fontSize:12,color:j.isExternal?C.purple:eng?C.text:C.danger,fontWeight:j.isExternal||!eng?700:400}}>{j.isExternal?`${j.externalName} (External)`:eng?.name||"Unassigned"}</td>
                         <td style={{padding:"9px 13px"}}><Badge status={j.status}/></td>
@@ -3159,7 +3159,7 @@ export default function App() {
                         <td onClick={()=>setSelJob(j)} style={{padding:"9px 13px",cursor:"pointer"}}><div style={{fontWeight:700,fontSize:13,display:"flex",alignItems:"center",gap:6}}>{j.customer}{j.isTest&&<TestPill/>}</div><div style={{color:C.light,fontSize:10}} title={j.sourceUrl||j.source}>{j.sourceUrl?shortSource(j.sourceUrl):j.source}</div></td>
                         <td onClick={()=>setSelJob(j)} style={{padding:"9px 13px",fontSize:12,cursor:"pointer"}}>{j.appliance}</td>
                         <td onClick={()=>setSelJob(j)} style={{padding:"9px 13px",fontSize:12,fontWeight:600,cursor:"pointer"}}>{j.brand||<span style={{color:C.light}}>—</span>}</td>
-                        <td onClick={()=>setSelJob(j)} style={{padding:"9px 13px",fontSize:12,cursor:"pointer"}}>{j.applianceAge?`${j.applianceAge}yr`:<span style={{color:C.light}}>—</span>}</td>
+                        <td onClick={()=>setSelJob(j)} style={{padding:"9px 13px",fontSize:12,cursor:"pointer"}}>{j.applianceAgeLabel?j.applianceAgeLabel:j.applianceAge?`${j.applianceAge}yr`:<span style={{color:C.light}}>—</span>}</td>
                         <td onClick={()=>setSelJob(j)} style={{padding:"9px 13px",fontSize:11,color:C.light,cursor:"pointer"}}>{j.createdAt?new Date(j.createdAt).toLocaleDateString("en-GB"):"—"}</td>
                         <td style={{padding:"9px 13px",textAlign:"right"}} onClick={e=>e.stopPropagation()}><Btn onClick={()=>convertToBooking(j)} sm>Convert to Booking</Btn></td>
                       </tr>
