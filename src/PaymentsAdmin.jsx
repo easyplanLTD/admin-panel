@@ -485,7 +485,8 @@ export function JobPaymentPanel({ job, engineers = [], isOwner, onChanged }) {
   const [err, setErr] = useState("");
   if (!loaded) return null;
 
-  const live = settings.payments_live;
+  // Test bookings can use Stripe (test keys) before payments go live for everyone.
+  const live = settings.payments_live || !!job.isTest;
   const route = paymentRoute(job);
   const m = jobMoney(job, settings, overrides);
   const mIfApproved = jobMoney(job, settings, overrides, { includePending: true });
@@ -621,6 +622,7 @@ export function JobPaymentPanel({ job, engineers = [], isOwner, onChanged }) {
         {job.uncollectableAt && <Btn variant="success" sm onClick={() => setModal("paidLate")}>Customer paid after all</Btn>}
         {["paid", "part_refunded"].includes(job.paymentStatus) && <Btn variant="ghost" sm onClick={() => setModal("refund")}>Refund…</Btn>}
         {isOwner && <Btn variant="ghost" sm onClick={() => setModal("split")}>Change split for this job</Btn>}
+        {job.isTest && !job.hasSavedCard && <Btn variant="ghost" sm onClick={() => viaStripe("test_attach_card", {}, "charge")}>Add Stripe test card</Btn>}
         {eng && <Pill>{eng.name}: Stripe {STRIPE_STATUS_LABELS[eng.stripeStatus || "not_started"]}</Pill>}
       </div>
       {!live && <NotLiveNote />}
@@ -984,7 +986,7 @@ export function PlanBillingPanel({ plan, onChanged }) {
   const [modal, setModal] = useState(null);
   const [err, setErr] = useState("");
   if (!loaded) return null;
-  const live = settings.payments_live;
+  const live = settings.payments_live || !!plan.isTest;
   const interval = plan.billingInterval || "month";
   const count = plan.applianceCount || 1;
   const listPrice = planPricePence(settings, interval, count);
