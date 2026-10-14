@@ -247,5 +247,11 @@ export function mapPaymentFields(row = {}) {
   };
 }
 
+// Jobs paid through Stripe (card saved at booking, Pay after repair, or
+// already charged/linked) pay the engineer directly, so they're left out of
+// the old "EasyRepair pays the SP a per-job rate" lists.
+export const isStripeJob = (job) =>
+  !!job && ((job.paymentStatus && job.paymentStatus !== "not_charged") || job.hasSavedCard || job.paymentTiming === "after");
+
 // Short reference for a booking (falls back to the start of its UUID).
 export const jobRef = (job) => job?.bookingRef || (job?.id ? `#${String(job.id).slice(0, 8)}` : "");

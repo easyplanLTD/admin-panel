@@ -1,7 +1,7 @@
 import { useState, useMemo, useEffect, useRef } from "react";
 import { supabase } from "./lib/supabaseClient";
 import { PaymentsSettings, JobPaymentPanel, DisputesView, CustomerPaymentsPanel, PlanBillingPanel, useOpenFlagsCount } from "./PaymentsAdmin";
-import { mapPaymentFields } from "./paymentsShared";
+import { mapPaymentFields, isStripeJob } from "./paymentsShared";
 
 // ─── CONSTANTS ───────────────────────────────────────────────────────────────
 const APPLIANCE_TYPES = ["Washing Machine","Tumble Dryer","Dishwasher","Fridge/Freezer","Oven/Cooker","Hob","Microwave"];
@@ -1010,8 +1010,10 @@ function EngineerEditor({eng,onSave,onCancel,isOwner}) {
           </select>
         </Fl>
       </div>
-      {/* SPs can always edit their own skills, coverage, hours and documents in the Portal (migration 0012) -- no per-SP switch. */}
-      <div style={{color:C.light,fontSize:12,marginBottom:18}}>This SP can also update their own skills, coverage, working hours and documents in the Portal.</div>
+      <label style={{display:"flex",alignItems:"center",gap:8,cursor:"pointer",marginBottom:18,fontSize:13}}>
+        <input type="checkbox" checked={!!e.selfServiceEnabled} onChange={ev=>setEng("selfServiceEnabled",ev.target.checked)}/>
+        Let this SP edit their own Portal Settings (skills, coverage)
+      </label>
 
       <div style={{fontWeight:800,fontSize:13,color:C.mid,marginBottom:10,paddingBottom:8,borderBottom:`1px solid ${C.border}`,textTransform:"uppercase",letterSpacing:.5}}>Postcode Areas Covered</div>
       <div style={{display:"flex",gap:6,flexWrap:"wrap",marginBottom:10}}>
@@ -3152,7 +3154,7 @@ export default function App() {
     await supabase.from("engineers").update({
       business_name:(engData.businessName||"").trim()||null,
       pay_rate:engData.rate, type:engData.type||"appliance", postcodes:engData.postcodes, appliance_types:engData.applianceTypes,
-      brand_exclusions:engData.brandExclusions, self_service_enabled:true,
+      brand_exclusions:engData.brandExclusions, self_service_enabled:engData.selfServiceEnabled,
       working_hours:engData.workingHours, insurance_expiry_date:engData.insuranceExpiryDate||null,
     }).eq("id",engData.id);
     await loadEngineers();
@@ -3816,7 +3818,8 @@ export default function App() {
           {view==="payments"&&(()=>{
             const payees = [
               ...engineers.map(eng=>{
-                const done=jobs.filter(j=>j.engineerId===eng.id&&j.status==="Completed");
+                // Stripe-paid jobs pay the engineer directly, so they're not owed here.
+                const done=jobs.filter(j=>j.engineerId===eng.id&&j.status==="Completed"&&!isStripeJob(j));
                 const ber=jobs.filter(j=>j.engineerId===eng.id&&j.status==="Beyond Repair");
                 return {
                   key:`eng-${eng.id}`, external:false,
