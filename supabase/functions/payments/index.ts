@@ -321,7 +321,6 @@ async function onboardingLink(c: Caller, body: any) {
     use_case: {
       type: "account_onboarding",
       account_onboarding: {
-        configurations: ["merchant", "recipient"],
         refresh_url: `${back}/?stripe=refresh`,
         return_url: `${back}/?stripe=done`,
       },
