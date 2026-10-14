@@ -1010,10 +1010,8 @@ function EngineerEditor({eng,onSave,onCancel,isOwner}) {
           </select>
         </Fl>
       </div>
-      <label style={{display:"flex",alignItems:"center",gap:8,cursor:"pointer",marginBottom:18,fontSize:13}}>
-        <input type="checkbox" checked={!!e.selfServiceEnabled} onChange={ev=>setEng("selfServiceEnabled",ev.target.checked)}/>
-        Let this SP edit their own Portal Settings (skills, coverage)
-      </label>
+      {/* SPs can always edit their own skills, coverage, hours and documents in the Portal (migration 0012) -- no per-SP switch. */}
+      <div style={{color:C.light,fontSize:12,marginBottom:18}}>This SP can also update their own skills, coverage, working hours and documents in the Portal.</div>
 
       <div style={{fontWeight:800,fontSize:13,color:C.mid,marginBottom:10,paddingBottom:8,borderBottom:`1px solid ${C.border}`,textTransform:"uppercase",letterSpacing:.5}}>Postcode Areas Covered</div>
       <div style={{display:"flex",gap:6,flexWrap:"wrap",marginBottom:10}}>
@@ -3154,7 +3152,7 @@ export default function App() {
     await supabase.from("engineers").update({
       business_name:(engData.businessName||"").trim()||null,
       pay_rate:engData.rate, type:engData.type||"appliance", postcodes:engData.postcodes, appliance_types:engData.applianceTypes,
-      brand_exclusions:engData.brandExclusions, self_service_enabled:engData.selfServiceEnabled,
+      brand_exclusions:engData.brandExclusions, self_service_enabled:true,
       working_hours:engData.workingHours, insurance_expiry_date:engData.insuranceExpiryDate||null,
     }).eq("id",engData.id);
     await loadEngineers();
