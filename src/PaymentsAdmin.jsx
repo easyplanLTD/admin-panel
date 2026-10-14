@@ -56,7 +56,12 @@ function useTable(table, { order = "sort_order", filter } = {}) {
 // Calls the payments Edge Function (added when Stripe goes live).
 async function callPayments(action, body) {
   const { data, error } = await supabase.functions.invoke("payments", { body: { action, ...body } });
-  if (error) throw new Error(error.message || "Payment request failed.");
+  if (error) {
+    // Show the function's own message (e.g. Stripe's reason) rather than "non-2xx status code".
+    let msg = error.message || "Payment request failed.";
+    try { const b = await error.context?.json?.(); if (b?.error) msg = b.error; } catch (_) { /* keep generic message */ }
+    throw new Error(msg);
+  }
   if (data?.error) throw new Error(data.error);
   return data;
 }
