@@ -1,6 +1,6 @@
 import { useState, useMemo, useEffect, useRef } from "react";
 import { supabase } from "./lib/supabaseClient";
-import { PaymentsSettings, JobPaymentPanel, DisputesView, CustomerPaymentsPanel, PlanBillingPanel, useOpenFlagsCount } from "./PaymentsAdmin";
+import { PaymentsSettings, JobPaymentPanel, JobStatusActions, DisputesView, CustomerPaymentsPanel, PlanBillingPanel, useOpenFlagsCount } from "./PaymentsAdmin";
 import { mapPaymentFields, isStripeJob } from "./paymentsShared";
 
 // ─── CONSTANTS ───────────────────────────────────────────────────────────────
@@ -845,6 +845,7 @@ function JobDetail({job,onClose,onEdit,onReassign,onDelete,engineers,isOwner,onP
         ))}
       </div>
 
+      <JobStatusActions job={job} onChanged={onPaymentChanged}/>
       <JobPaymentPanel job={job} engineers={engineers} isOwner={isOwner} onChanged={onPaymentChanged}/>
 
       {job.notes&&<div style={{background:"rgba(251,191,36,0.08)",borderRadius:9,padding:12,marginBottom:12,border:"1px solid rgba(251,191,36,0.25)"}}><div style={{fontSize:10,color:"#fbbf24",fontWeight:700,textTransform:"uppercase",marginBottom:4}}>Notes</div><div style={{fontSize:13,color:"#F1F5F9",whiteSpace:"pre-wrap"}}>{job.notes}</div></div>}
@@ -1787,6 +1788,8 @@ function mapBookingRow(row){
     // be finished first time (see 0009_return_visit.sql). Read-only here.
     returnVisitDate: row.return_visit_date||"", returnVisitTime: row.return_visit_time?String(row.return_visit_time).slice(0,5):"",
     rate: row.rate, paid: row.paid, notes: row.notes||"",
+    // Customer has paid (recorded by the engineer in the Portal, or by the office) -- 0008_payment_taken.sql.
+    paymentTaken: !!row.payment_taken, paymentTakenAt: row.payment_taken_at||null,
     // One-off engineer from outside Easy Repair's normal roster, used when a
     // booking comes in somewhere we don't have in-house coverage. Stored
     // directly on the booking (see 0004_external_engineers.sql) rather than

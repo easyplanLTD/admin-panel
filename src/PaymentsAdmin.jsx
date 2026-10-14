@@ -476,6 +476,68 @@ function VatGoLiveForm({ settings, onSaved }) {
 // ═══════════════════════════════════════════════════════════════════════════
 //  JOB PAYMENT PANEL (inside JobDetail)
 // ═══════════════════════════════════════════════════════════════════════════
+// ─── Job status quick actions (FixFlow booking view) ─────────────────────────
+// Lets the office do what an engineer does from the Portal: record that the
+// customer has paid (cash / outside Stripe) and mark the job completed.
+// Card jobs and Pay after repair jobs can be completed straight away when
+// payments are live (or on test bookings); completing them then charges the
+// saved card or sends the payment link, exactly as the Portal does.
+const CLOSED = ["Completed", "Beyond Repair", "Cancelled"];
+export function JobStatusActions({ job, onChanged }) {
+  const { settings } = usePaymentSettings();
+  const [busy, setBusy] = useState("");
+  const [msg, setMsg] = useState(null); // { kind: "ok" | "err", text }
+  const live = !!settings.payments_live || !!job.isTest;
+  const autoPay = live && !job.isExternal && (job.hasSavedCard || job.paymentTiming === "after");
+  const closed = CLOSED.includes(job.status);
+
+  const togglePaid = async () => {
+    if (busy) return;
+    setBusy("paid"); setMsg(null);
+    const on = !job.paymentTaken;
+    const { error } = await supabase.from("bookings").update({ payment_taken: on, payment_taken_at: on ? new Date().toISOString() : null }).eq("id", job.id);
+    setBusy("");
+    if (error) setMsg({ kind: "err", text: error.message }); else await onChanged?.();
+  };
+
+  const complete = async () => {
+    if (busy) return;
+    setMsg(null);
+    if (job.partsApprovalStatus === "pending") { setMsg({ kind: "err", text: "The customer hasn't approved the parts yet. Approve or decline them in Customer payment first." }); return; }
+    if (!job.paymentTaken && !autoPay) { setMsg({ kind: "err", text: "Record the payment first (Payment taken), or use a card / Pay after repair booking once payments are live." }); return; }
+    setBusy("complete");
+    const { error } = await supabase.from("bookings").update({ status: "Completed", completed_date: new Date().toISOString().slice(0, 10) }).eq("id", job.id);
+    if (error) { setBusy(""); setMsg({ kind: "err", text: error.message }); return; }
+    if (autoPay) {
+      try {
+        const res = await callPayments("job_completed", { bookingId: job.id });
+        const r = res?.job;
+        if (r && typeof r === "object" && r.ok === false) setMsg({ kind: "err", text: `Completed. The card was declined (${r.reason}), so a payment link was created instead.` });
+        else if (r && typeof r === "object" && r.url) setMsg({ kind: "ok", text: "Completed. A payment link was created for the customer." });
+        else if (r && typeof r === "object" && r.ok) setMsg({ kind: "ok", text: "Completed and the saved card was charged." });
+        else if (r === "waiting for parts approval") setMsg({ kind: "ok", text: "Completed. The card will be charged once the parts are approved." });
+        else setMsg({ kind: "ok", text: "Completed." });
+      } catch (e) { setMsg({ kind: "err", text: `Completed, but payment didn't start: ${e.message}` }); }
+    } else setMsg({ kind: "ok", text: "Completed." });
+    setBusy("");
+    await onChanged?.();
+  };
+
+  return (
+    <div style={{ ...box(), border: `1px solid ${C.border}` }}>
+      <div style={{ fontSize: 12, fontWeight: 800, color: C.text, textTransform: "uppercase", letterSpacing: .4, marginBottom: 10 }}>Job status</div>
+      <div style={{ display: "flex", gap: 6, flexWrap: "wrap", alignItems: "center" }}>
+        <Btn sm variant={job.paymentTaken ? "success" : "ghost"} disabled={!!busy} onClick={togglePaid}>{job.paymentTaken ? "✓ Payment taken" : "Payment taken"}</Btn>
+        {!closed && <Btn sm disabled={!!busy} onClick={complete}>{busy === "complete" ? "Completing…" : "Mark completed"}</Btn>}
+        {closed && <Pill>{job.status}</Pill>}
+        {autoPay && !closed && <span style={{ fontSize: 12, color: C.mid }}>{job.hasSavedCard ? "Completing charges the saved card." : "Completing creates the customer's payment link."}</span>}
+      </div>
+      {!autoPay && !closed && <div style={{ fontSize: 12, color: C.light, marginTop: 8 }}>Use "Payment taken" only when the customer paid outside Stripe (for example an external SP's job).</div>}
+      {msg && <div style={{ fontSize: 13, marginTop: 8, color: msg.kind === "err" ? C.danger : C.success }}>{msg.text}</div>}
+    </div>
+  );
+}
+
 export function JobPaymentPanel({ job, engineers = [], isOwner, onChanged }) {
   const { settings, loaded } = usePaymentSettings();
   const { rows: overrides } = useTable("payment_overrides", { order: "created_at" });
