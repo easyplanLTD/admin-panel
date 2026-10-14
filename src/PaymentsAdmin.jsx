@@ -610,6 +610,18 @@ export function JobPaymentPanel({ job, engineers = [], isOwner, onChanged }) {
         {job.paidAt && ` Paid ${fmtDateTime(job.paidAt)}.`}
       </div>
 
+      {/* customer's payment link (Pay after repair, or a declined card) */}
+      {job.paymentLinkUrl && !["paid", "refunded", "part_refunded"].includes(job.paymentStatus) && (
+        <div style={{ marginTop: 12 }}>
+          <div style={label()}>Customer's payment link</div>
+          <div style={{ fontSize: 12, color: C.mid, wordBreak: "break-all", marginBottom: 6 }}>{job.paymentLinkUrl}</div>
+          <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+            <Btn variant="ghost" sm onClick={() => navigator.clipboard?.writeText(job.paymentLinkUrl)}>Copy link</Btn>
+            <Btn variant="ghost" sm onClick={() => window.open(job.paymentLinkUrl, "_blank", "noopener")}>Open link</Btn>
+          </div>
+        </div>
+      )}
+
       {/* parts */}
       {(job.partsLines?.length > 0 || job.partsApprovalStatus !== "none") && (
         <div style={{ marginTop: 12 }}>
