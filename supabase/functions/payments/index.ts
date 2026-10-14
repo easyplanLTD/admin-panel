@@ -259,6 +259,27 @@ function requireLive(s: any, c: Caller, b?: any) {
 
 // ---------------------------------------------------------------- engineers
 
+// Engineer accounts are created with Stripe's Accounts v2 API (new Connect
+// platforms can't create v1 accounts). Everything else -- charges,
+// application fees, refunds, account sessions, transfers -- uses the normal
+// v1 API with the same acct_ id, which Stripe supports for v2 accounts.
+const V2_VERSION = "2026-09-30.endive";
+async function stripeV2(path: string, body?: unknown, idempotencyKey?: string) {
+  const r = await fetch(`https://api.stripe.com${path}`, {
+    method: body ? "POST" : "GET",
+    headers: {
+      Authorization: `Bearer ${STRIPE_KEY}`,
+      "Stripe-Version": V2_VERSION,
+      "Content-Type": "application/json",
+      ...(idempotencyKey ? { "Idempotency-Key": idempotencyKey } : {}),
+    },
+    body: body ? JSON.stringify(body) : undefined,
+  });
+  const out = await r.json().catch(() => ({}));
+  if (!r.ok) throw new UserError(`Stripe: ${out?.error?.message || r.statusText}`, 502);
+  return out;
+}
+
 async function onboardingLink(c: Caller, body: any) {
   const engId = isStaff(c) && body.engineerId ? body.engineerId : c.engineerId;
   if (!engId) fail("No engineer account found for this login", 403);
@@ -266,36 +287,63 @@ async function onboardingLink(c: Caller, body: any) {
   if (!eng) fail("Engineer not found", 404);
   let accountId = eng.stripe_account_id;
   if (!accountId) {
-    const acct = await stripe.accounts.create({
-      country: "GB",
-      email: eng.profile?.email || undefined,
-      controller: {
-        fees: { payer: "account" },
-        losses: { payments: "stripe" },
-        requirement_collection: "stripe",
-        stripe_dashboard: { type: "none" },
+    const acct = await stripeV2("/v2/core/accounts", {
+      contact_email: eng.profile?.email || undefined,
+      display_name: eng.business_name || eng.profile?.name || undefined,
+      dashboard: "none",
+      identity: { country: "gb" },
+      configuration: {
+        merchant: {
+          mcc: "7629", // electrical and small appliance repair
+          capabilities: { card_payments: { requested: true } },
+          support: { url: SITE_URL },
+        },
+        // Lets EasyRepair transfer the engineer's share of no-show fees.
+        recipient: { capabilities: { stripe_balance: { stripe_transfers: { requested: true } } } },
       },
-      capabilities: { card_payments: { requested: true }, transfers: { requested: true } },
-      business_profile: {
-        mcc: "7629", // electrical and small appliance repair
-        name: eng.business_name || eng.profile?.name || undefined,
-        product_description: "Domestic appliance repairs booked through EasyRepair",
-        url: SITE_URL,
+      defaults: {
+        currency: "gbp",
+        locales: ["en-GB"],
+        responsibilities: { fees_collector: "stripe", losses_collector: "stripe" },
       },
       metadata: { engineer_id: eng.id },
-    }, { idempotencyKey: `acct-${eng.id}` });
+      include: ["configuration.merchant", "requirements"],
+    }, `acct-v2-${eng.id}`);
     accountId = acct.id;
     const { error } = await db.from("engineers").update({ stripe_account_id: accountId, stripe_status: "incomplete", stripe_updated_at: new Date().toISOString() }).eq("id", eng.id);
     if (error) throw error;
+  } else {
+    await refreshAccountById(accountId);
   }
   const back = (body.returnUrl || PORTAL_URL || SITE_URL).replace(/\/$/, "");
-  const link = await stripe.accountLinks.create({
+  const link = await stripeV2("/v2/core/account_links", {
     account: accountId,
-    type: "account_onboarding",
-    refresh_url: `${back}/?stripe=refresh`,
-    return_url: `${back}/?stripe=done`,
+    use_case: {
+      type: "account_onboarding",
+      account_onboarding: {
+        configurations: ["merchant", "recipient"],
+        refresh_url: `${back}/?stripe=refresh`,
+        return_url: `${back}/?stripe=done`,
+      },
+    },
   });
   return { url: link.url };
+}
+
+// Reads the account through the v1 API (works for v2 accounts) and updates
+// the engineer's Stripe status. Called when they come back from onboarding
+// and before charging, so nothing depends on webhooks arriving.
+async function refreshAccountById(accountId: string) {
+  const acct = await stripe.accounts.retrieve(accountId);
+  await syncAccount(acct);
+  return acct;
+}
+async function refreshAccount(c: Caller, body: any) {
+  const engId = isStaff(c) && body.engineerId ? body.engineerId : c.engineerId;
+  const eng = await engineer(engId);
+  if (!eng?.stripe_account_id) return { status: "not_started" };
+  const acct = await refreshAccountById(eng.stripe_account_id);
+  return { chargesEnabled: !!acct.charges_enabled, payoutsEnabled: !!acct.payouts_enabled };
 }
 
 // For the Portal's embedded payouts panel (Stripe Connect embedded components).
@@ -372,7 +420,11 @@ async function engineerAccount(b: any) {
   if (b.is_external) fail("This job went to an external engineer, so it can't be paid through Stripe.");
   const eng = await engineer(b.engineer_id);
   if (!eng?.stripe_account_id) fail("The engineer hasn't set up Stripe yet.");
-  if (!eng.stripe_charges_enabled) fail("The engineer's Stripe account can't take payments yet.");
+  if (!eng.stripe_charges_enabled) {
+    const acct = await refreshAccountById(eng.stripe_account_id);
+    if (!acct.charges_enabled) fail("The engineer's Stripe account can't take payments yet.");
+    eng.stripe_charges_enabled = true;
+  }
   return eng;
 }
 
@@ -902,6 +954,7 @@ async function payPage(url: URL) {
   if (["paid", "refunded", "part_refunded"].includes(b.payment_status)) return Response.redirect(`${SITE_URL}/?payment=already-paid`, 303);
   if (b.parts_approval_status === "pending") return text("Your engineer has quoted parts that need your approval first. Please use the approval link we sent you, or call EasyRepair.", 409);
   const eng = await engineer(b.engineer_id);
+  if (eng?.stripe_account_id && !eng.stripe_charges_enabled) eng.stripe_charges_enabled = !!(await refreshAccountById(eng.stripe_account_id)).charges_enabled;
   if (!eng?.stripe_account_id || !eng.stripe_charges_enabled) return text("Payment isn't available for this job yet. Please contact EasyRepair.", 409);
   const s = await settings();
   const m = jobCharge(b, s, await overrides());
@@ -950,6 +1003,7 @@ async function testAttachCard(c: Caller, body: any) {
 const ACTIONS: Record<string, (c: Caller, body: any) => Promise<unknown>> = {
   onboarding_link: onboardingLink,
   account_session: accountSession,
+  refresh_account: refreshAccount,
   start_card_setup: startCardSetup,       // public (booking form)
   job_completed: jobCompleted,
   charge_job: chargeJob,
