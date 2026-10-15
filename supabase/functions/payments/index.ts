@@ -39,6 +39,7 @@
 
 import Stripe from "npm:stripe@17.7.0";
 import { createClient } from "npm:@supabase/supabase-js@2";
+import QRCode from "npm:qrcode@1.5.4";
 
 const SUPABASE_URL = Deno.env.get("SUPABASE_URL")!;
 const SERVICE_ROLE_KEY = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
@@ -124,7 +125,9 @@ export function termsFor(b: any, s: any, overrides: any[] = []) {
 export function jobCharge(b: any, s: any, overrides: any[] = []) {
   const terms = termsFor(b, s, overrides);
   const callout = calloutPence(b, s);
-  const parts = b.parts_approval_status === "approved" ? Number(b.parts_total_pence || 0) : 0;
+  // Beyond economical repair: the customer pays the callout only.
+  const parts = b.pending_outcome === "Beyond Repair" ? 0
+    : b.parts_approval_status === "approved" ? Number(b.parts_total_pence || 0) : 0;
   const engineerGross = Math.round((callout * terms.engineer_callout_share) / 100) + Math.round((parts * terms.engineer_parts_share) / 100);
   const adminFee = b.admin_fee_applied_at ? Number(b.admin_fee_pence || 0) : 0;
   const adminFeeEngineer = Math.round((adminFee * Number(s.admin_fee_engineer_share || 0)) / 100);
@@ -411,9 +414,9 @@ async function startCardSetup(_c: Caller, body: any) {
 // --------------------------------------------------------- charging a job
 
 function checkChargeable(b: any) {
-  if (b.status !== "Completed") fail("The job needs to be marked completed first.");
+  if (b.status !== "Completed" && !b.pending_outcome) fail("The job needs to be marked completed first.");
   if (["paid", "processing", "refunded", "part_refunded"].includes(b.payment_status)) fail("This job has already been paid.");
-  if (b.parts_approval_status === "pending") fail("The customer hasn't approved the parts yet.");
+  if (b.parts_approval_status === "pending" && b.pending_outcome !== "Beyond Repair") fail("The customer hasn't approved the parts yet.");
 }
 async function engineerAccount(b: any) {
   if (b.is_external) fail("This job went to an external engineer, so it can't be paid through Stripe.");
@@ -470,12 +473,61 @@ async function chargeJob(c: Caller, body: any) {
     if (pi.status === "succeeded") await markJobPaid(pi, eng.stripe_account_id);
     return { ok: true, status: pi.status, amountPence: m.total };
   } catch (e: any) {
-    // Card declined or needs the customer: fall back to a payment link.
+    // Card declined or needs the customer: fall back to a payment link
+    // (or, from the Take payment screen, let the engineer pick another way).
     const reason = e?.raw?.message || e?.message || "The card was declined";
     await updateBooking(b.id, { payment_status: "outstanding" });
+    if (body.noFallback) return { ok: false, reason };
     const link = await sendPaymentLinkFor(b, `We couldn't take payment from your saved card (${reason}).`);
     return { ok: false, fallback: "payment_link", reason, ...link };
   }
+}
+
+// ─── Take payment (Portal) ───────────────────────────────────────────────
+// The engineer picks the outcome (Repaired / BER) and how the customer pays.
+// The job completes by itself once the money is in (see markJobPaid); until
+// then it shows as "Awaiting payment".
+//   method: "card"  -> charge the card saved at booking
+//           "sms" | "email" -> send the payment link that way
+//           "qr"    -> return a QR code of the payment link for the customer to scan
+//           "phone" -> return the link to open on the engineer's phone for the customer
+async function takePayment(c: Caller, body: any) {
+  const s = await settings();
+  let b = await booking(body.bookingId);
+  requireStaffOrJobEngineer(c, b);
+  requireLive(s, c, b);
+  const outcome = body.outcome === "Beyond Repair" ? "Beyond Repair" : body.outcome === "Completed" ? "Completed" : fail("Choose Repaired or BER.");
+  if (["Completed", "Beyond Repair", "Cancelled"].includes(b.status)) fail("This job is already closed.");
+  if (["paid", "processing", "refunded", "part_refunded"].includes(b.payment_status)) fail("This job has already been paid.");
+  if (outcome === "Completed" && b.parts_approval_status === "pending") fail("The customer needs to approve the parts first.");
+  await engineerAccount(b);
+  await updateBooking(b.id, { pending_outcome: outcome, awaiting_payment_since: b.awaiting_payment_since || new Date().toISOString() });
+  b = { ...b, pending_outcome: outcome };
+  const m = jobCharge(b, s, await overrides());
+  const method = String(body.method || "");
+
+  if (method === "card") {
+    if (!b.stripe_payment_method_id) fail("There's no card saved for this customer. Use a payment link, QR code or phone payment.");
+    const r: any = await chargeJob(c, { bookingId: b.id, noFallback: true });
+    return { ...r, totalPence: m.total };
+  }
+
+  const url = await payUrl(b.id);
+  await updateBooking(b.id, { payment_link_url: url, payment_status: "outstanding" });
+  if (method === "sms" || method === "email") {
+    const msg = `EasyRepair: thank you, your ${b.appliance || "appliance"} job (${ref(b)}) is done. Please pay ${gbp(m.total)} securely here: ${url}`;
+    const ok = method === "sms"
+      ? await sendSms(b.phone, msg).catch(() => false)
+      : await sendEmail(b.email, `Payment for your EasyRepair job ${ref(b)}`, msg).catch(() => false);
+    if (!ok) return { url, totalPence: m.total, sent: false, error: method === "sms" ? "The text couldn't be sent (texts aren't set up yet, or the number is missing). Use the QR code or phone payment instead." : "The email couldn't be sent (emails aren't set up yet, or the address is missing). Use the QR code or phone payment instead." };
+    return { url, totalPence: m.total, sent: true };
+  }
+  if (method === "qr") {
+    const svg = await QRCode.toString(url, { type: "svg", margin: 1, width: 240, errorCorrectionLevel: "M" });
+    return { url, svg, totalPence: m.total };
+  }
+  if (method === "phone") return { url, totalPence: m.total };
+  fail("Choose how the customer will pay.");
 }
 
 async function sendPaymentLinkFor(b: any, lead = "") {
@@ -752,8 +804,8 @@ async function daily(c: Caller) {
   const today = new Date().toISOString().slice(0, 10);
 
   const { data: unpaid } = await db.from("bookings").select("*")
-    .eq("status", "Completed").eq("payment_timing", "after").eq("payment_status", "outstanding")
-    .is("admin_fee_applied_at", null).lt("completed_date", today);
+    .eq("payment_timing", "after").eq("payment_status", "outstanding")
+    .is("admin_fee_applied_at", null).lt("awaiting_payment_since", `${today}T00:00:00Z`);
   for (const b of unpaid || []) {
     try { await applyAdminFee(c, { bookingId: b.id }); out.adminFees++; } catch (_) { /* keep going */ }
   }
@@ -837,6 +889,9 @@ async function markJobPaid(pi: Stripe.PaymentIntent, account: string) {
     engineer_share_pence: pi.metadata?.engineer_share_pence ? Number(pi.metadata.engineer_share_pence) : b.engineer_share_pence,
     payment_taken: true, payment_taken_at: new Date().toISOString(),
     uncollectable_at: null,
+    // Paid from the Take payment screen: the job completes now, with the outcome the engineer picked.
+    ...(b.pending_outcome && !["Completed", "Beyond Repair", "Cancelled"].includes(b.status)
+      ? { status: b.pending_outcome, completed_date: new Date().toISOString().slice(0, 10) } : {}),
   });
 }
 
@@ -951,7 +1006,7 @@ async function payPage(url: URL) {
   const { data: b } = await db.from("bookings").select("*").eq("id", id).maybeSingle();
   if (!b) return text("Booking not found. Please contact EasyRepair.", 404);
   if (["paid", "refunded", "part_refunded"].includes(b.payment_status)) return Response.redirect(`${SITE_URL}/?payment=already-paid`, 303);
-  if (b.parts_approval_status === "pending") return text("Your engineer has quoted parts that need your approval first. Please use the approval link we sent you, or call EasyRepair.", 409);
+  if (b.parts_approval_status === "pending" && b.pending_outcome !== "Beyond Repair") return text("Your engineer has quoted parts that need your approval first. Please use the approval link we sent you, or call EasyRepair.", 409);
   const eng = await engineer(b.engineer_id);
   if (eng?.stripe_account_id && !eng.stripe_charges_enabled) eng.stripe_charges_enabled = !!(await refreshAccountById(eng.stripe_account_id)).charges_enabled;
   if (!eng?.stripe_account_id || !eng.stripe_charges_enabled) return text("Payment isn't available for this job yet. Please contact EasyRepair.", 409);
@@ -1005,6 +1060,7 @@ const ACTIONS: Record<string, (c: Caller, body: any) => Promise<unknown>> = {
   refresh_account: refreshAccount,
   start_card_setup: startCardSetup,       // public (booking form)
   job_completed: jobCompleted,
+  take_payment: takePayment,
   charge_job: chargeJob,
   send_payment_link: sendPaymentLink,
   apply_admin_fee: applyAdminFee,
