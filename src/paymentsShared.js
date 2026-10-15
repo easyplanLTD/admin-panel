@@ -244,6 +244,8 @@ export function mapPaymentFields(row = {}) {
     commissionRefundedPence: row.commission_refunded_pence ?? null,
     refundedAt: row.refunded_at || null,
     refundSource: row.refund_source || null,
+    pendingOutcome: row.pending_outcome || null,       // outcome picked on Take payment, applied once paid
+    awaitingPaymentSince: row.awaiting_payment_since || null,
   };
 }
 
