@@ -651,7 +651,7 @@ async function partsQuote(_c: Caller, body: any) {
   const s = await settings();
   const callout = calloutPence(b, s);
   return {
-    ref: ref(b), appliance: b.appliance, status: b.parts_approval_status,
+    ref: ref(b), appliance: b.appliance, brand: b.brand, status: b.parts_approval_status,
     lines: (b.parts_lines || []).map((l: any) => ({ description: l.description, price_pence: l.price_pence })),
     partsTotalPence: b.parts_total_pence, calloutPence: callout, totalIfApprovedPence: callout + Number(b.parts_total_pence || 0),
   };
@@ -659,14 +659,20 @@ async function partsQuote(_c: Caller, body: any) {
 async function partsRespond(_c: Caller, body: any) {
   if (!(await verify(`parts:${body.bookingId}`, body.t))) fail("This link isn't valid", 403);
   const b = await booking(body.bookingId);
-  if (b.parts_approval_status !== "pending") return { status: b.parts_approval_status };
+  // If a payment link has already gone out for this job, hand it back so the
+  // approval page can offer "Pay now" straight after the parts are approved.
+  const payNow = async (status: string) =>
+    status === "approved" && b.payment_link_url && !["paid", "refunded", "part_refunded"].includes(b.payment_status)
+      ? await payUrl(b.id) : null;
+  if (b.parts_approval_status !== "pending") return { status: b.parts_approval_status, payUrl: await payNow(b.parts_approval_status) };
   const approve = body.decision === "approve";
   await updateBooking(b.id, {
     parts_approval_status: approve ? "approved" : "declined",
     parts_approved_at: new Date().toISOString(),
     parts_approval_method: approve ? "Approved by customer online" : "Declined by customer online",
   });
-  return { status: approve ? "approved" : "declined" };
+  const status = approve ? "approved" : "declined";
+  return { status, payUrl: await payNow(status) };
 }
 
 // ------------------------------------------------- cancellation / no-show fees
