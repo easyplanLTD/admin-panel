@@ -364,6 +364,7 @@ async function onboardingLink(c: Caller, body: any) {
     accountId = acct.id;
     const { error } = await db.from("engineers").update({ stripe_account_id: accountId, stripe_status: "incomplete", stripe_updated_at: new Date().toISOString() }).eq("id", eng.id);
     if (error) throw error;
+    await ensureBranding({ ...eng, stripe_account_id: accountId });
   } else {
     await refreshAccountById(accountId);
   }
@@ -467,6 +468,97 @@ function checkChargeable(b: any) {
   if (["paid", "processing", "refunded", "part_refunded"].includes(b.payment_status)) fail("This job has already been paid.");
   if (b.parts_approval_status === "pending" && b.pending_outcome !== "Beyond Repair") fail("The customer hasn't approved the parts yet.");
 }
+// ------------------------------------------------------------- branding
+//
+// Engineers' Stripe accounts carry EasyRepair's branding, so Stripe Checkout
+// shows the EasyRepair logo (instead of the engineer's name), receipts use
+// EasyRepair's colours, and card statements read "EASYREPAIR* ER-10064".
+// Bump BRANDING_VERSION to push a change to every account; each account is
+// updated the next time it's used (or all at once via the apply_branding action).
+const BRANDING_VERSION = 1;
+const BRAND = {
+  logoUrl: `${SUPABASE_URL}/storage/v1/object/public/branding/easyrepair-logo-stripe.png`,
+  iconUrl: `${SUPABASE_URL}/storage/v1/object/public/branding/easyrepair-icon-stripe.png`,
+  primary: "#d4ff3c",
+  secondary: "#0a0a0a",
+  descriptorPrefix: "EASYREPAIR",   // max 10 characters
+  descriptor: "EASYREPAIR",          // max 22 characters
+};
+let brandFiles: { logo: Uint8Array; icon: Uint8Array } | null = null;
+
+async function uploadBrandFile(accountId: string, bytes: Uint8Array, purpose: string, name: string) {
+  const form = new FormData();
+  form.append("purpose", purpose);
+  form.append("file", new Blob([bytes], { type: "image/png" }), name);
+  const r = await fetch("https://files.stripe.com/v1/files", {
+    method: "POST",
+    headers: { Authorization: `Bearer ${STRIPE_KEY}`, "Stripe-Account": accountId },
+    body: form,
+  });
+  const out = await r.json().catch(() => ({}));
+  if (!r.ok) throw new Error(`Stripe file upload: ${out?.error?.message || r.statusText}`);
+  return out.id as string;
+}
+
+async function applyBrandingTo(accountId: string) {
+  if (!brandFiles) {
+    const [logo, icon] = await Promise.all([BRAND.logoUrl, BRAND.iconUrl].map(async (u) => {
+      const r = await fetch(u);
+      if (!r.ok) throw new Error(`Couldn't load ${u}`);
+      return new Uint8Array(await r.arrayBuffer());
+    }));
+    brandFiles = { logo, icon };
+  }
+  const [logoId, iconId] = await Promise.all([
+    uploadBrandFile(accountId, brandFiles.logo, "business_logo", "easyrepair-logo.png"),
+    uploadBrandFile(accountId, brandFiles.icon, "business_icon", "easyrepair-icon.png"),
+  ]);
+  await stripeV2(`/v2/core/accounts/${accountId}`, {
+    configuration: {
+      merchant: {
+        branding: { logo: logoId, icon: iconId, primary_color: BRAND.primary, secondary_color: BRAND.secondary },
+        statement_descriptor: { descriptor: BRAND.descriptor, prefix: BRAND.descriptorPrefix },
+      },
+    },
+  });
+}
+
+// Never blocks a payment: if branding fails it's logged and retried next time.
+async function ensureBranding(eng: any, force = false) {
+  if (!eng?.stripe_account_id) return false;
+  if (!force && Number(eng.stripe_branding_version || 0) >= BRANDING_VERSION) return true;
+  try {
+    await applyBrandingTo(eng.stripe_account_id);
+    await db.from("engineers").update({ stripe_branding_version: BRANDING_VERSION }).eq("id", eng.id);
+    eng.stripe_branding_version = BRANDING_VERSION;
+    return true;
+  } catch (e) {
+    console.error("branding", eng.stripe_account_id, e);
+    if (force) throw e;
+    return false;
+  }
+}
+
+// FixFlow / one-off: brand every engineer's Stripe account now.
+async function applyBranding(c: Caller, body: any) {
+  requireStaff(c);
+  let q = db.from("engineers").select("id, stripe_account_id, stripe_branding_version").not("stripe_account_id", "is", null);
+  if (body.engineerId) q = q.eq("id", body.engineerId);
+  const { data, error } = await q;
+  if (error) throw error;
+  const results: any[] = [];
+  for (const eng of data || []) {
+    try { await ensureBranding(eng, true); results.push({ engineerId: eng.id, ok: true }); }
+    catch (e: any) { results.push({ engineerId: eng.id, ok: false, error: e.message }); }
+  }
+  return { results };
+}
+
+// Card statement suffix for a job, e.g. "ER-10064" (prefix + suffix <= 22).
+function descriptorSuffix(b: any) {
+  return ref(b).replace(/[^A-Za-z0-9 .\-]/g, "").toUpperCase().slice(0, 10) || undefined;
+}
+
 async function engineerAccount(b: any) {
   if (b.is_external) fail("This job went to an external engineer, so it can't be paid through Stripe.");
   const eng = await engineer(b.engineer_id);
@@ -476,6 +568,7 @@ async function engineerAccount(b: any) {
     if (!acct.charges_enabled) fail("The engineer's Stripe account can't take payments yet.");
     eng.stripe_charges_enabled = true;
   }
+  await ensureBranding(eng);
   return eng;
 }
 
@@ -514,6 +607,7 @@ async function chargeJob(c: Caller, body: any) {
     const pi = await stripe.paymentIntents.create({
       amount: m.total, currency: "gbp", payment_method: pm.id, confirm: true, off_session: true,
       application_fee_amount: appFee,
+      statement_descriptor_suffix: descriptorSuffix(b),
       description: `EasyRepair job ${ref(b)} — ${b.appliance || "appliance repair"}`,
       receipt_email: b.email || undefined,
       metadata,
@@ -1076,6 +1170,7 @@ async function payPage(url: URL) {
   const eng = await engineer(b.engineer_id);
   if (eng?.stripe_account_id && !eng.stripe_charges_enabled) eng.stripe_charges_enabled = !!(await refreshAccountById(eng.stripe_account_id)).charges_enabled;
   if (!eng?.stripe_account_id || !eng.stripe_charges_enabled) return donePage("unavailable", b);
+  await ensureBranding(eng);
   const s = await settings();
   const m = jobCharge(b, s, await overrides());
   const rec = await recoveriesFor(eng.id, Math.max(0, m.engineerShare - estimateStripeFee(m.total)), b.id);
@@ -1088,6 +1183,7 @@ async function payPage(url: URL) {
     customer_email: b.email || undefined,
     payment_intent_data: {
       application_fee_amount: m.commission + rec.sum,
+      statement_descriptor_suffix: descriptorSuffix(b),
       description: `EasyRepair job ${ref(b)}`,
       metadata: {
         booking_id: b.id, kind: "job", fee_bearer: m.terms.fee_bearer,
@@ -1139,6 +1235,7 @@ const ACTIONS: Record<string, (c: Caller, body: any) => Promise<unknown>> = {
   cancel_plan: cancelPlan,
   daily: (c) => daily(c),
   test_attach_card: testAttachCard,
+  apply_branding: applyBranding,          // FixFlow (staff)
 };
 const PUBLIC = new Set(["start_card_setup", "parts_quote", "parts_respond"]);
 
