@@ -73,7 +73,7 @@ const AGE_YEARS_TO_LABEL = {
 // deployments, so swapping the logo image is just a Storage upload with no
 // site redeploy (and no GitHub push access) required.
 const PORTAL_URL = "https://portal.easyrepair.co.uk";
-const LOGO_URL = "https://nqubqtsjkhfswlrtjzia.supabase.co/storage/v1/object/public/branding/logo-easyrepair-2026.png";
+const LOGO_URL = "https://nqubqtsjkhfswlrtjzia.supabase.co/storage/v1/object/public/branding/easyrepair-logo-email.png";
 
 // Booking fields land here straight from the public website form (see
 // submit-booking) or staff typing in FixFlow, so they're untrusted input as
@@ -156,7 +156,7 @@ Full details are in the Portal: ${PORTAL_URL}`;
   <p style="margin: 0 0 4px;">Scheduled: ${escapeHtml(when)}</p>
   <p style="margin: 0 0 16px;">Priority: ${escapeHtml(priority)}</p>
   <p style="margin: 0 0 24px;">Full details are in the <a href="${PORTAL_URL}" style="color: #1a73e8; font-weight: bold; text-decoration: none;">Portal</a>.</p>
-  <img src="${LOGO_URL}" alt="Easy Repair" width="180" style="display: block; border: 0;">
+  <img src="${LOGO_URL}" alt="EasyRepair" width="200" height="44" style="display:block;border:0;width:200px;height:44px;">
 </div>`;
 
   const res = await fetch("https://api.resend.com/emails", {
@@ -351,7 +351,7 @@ async function notifyCustomerOfEngineer(b, eng) {
       "Thanks, Easy Repair",
     ].join("\n");
     const html = `<div style="font-family: Arial, sans-serif; font-size: 15px; color: #111; line-height: 1.5;">
-  <img src="${LOGO_URL}" alt="Easy Repair" style="height: 40px; margin-bottom: 16px;" />
+  <img src="${LOGO_URL}" alt="EasyRepair" width="200" height="44" style="display:block;border:0;width:200px;height:44px;margin-bottom:16px;" />
   <p>Hi ${escapeHtml(b.customer || "there")},</p>
   <p>Your Easy Repair engineer has been assigned to your booking.</p>
   <p style="margin: 0 0 4px;">Booking reference: <strong>${escapeHtml(ref)}</strong></p>
