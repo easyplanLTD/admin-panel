@@ -436,6 +436,21 @@ Deno.serve(async (req) => {
     auth: { autoRefreshToken: false, persistSession: false },
   });
 
+  // Claim this assignment BEFORE sending. FixFlow can save a booking twice in
+  // the same second (e.g. engineer + status), which fires this webhook twice;
+  // both calls used to pass the check above and send duplicates. This update
+  // only matches if nobody has claimed it yet, so exactly one call wins.
+  const { data: claimed, error: claimErr } = await admin
+    .from("bookings")
+    .update({ notified_engineer_id: engineerId })
+    .eq("id", record.id)
+    .or(`notified_engineer_id.is.null,notified_engineer_id.neq.${engineerId}`)
+    .select("id");
+  if (claimErr) return json({ error: "Could not claim notification", detail: claimErr.message }, 500);
+  if (!claimed || claimed.length === 0) {
+    return json({ skipped: true, reason: "already notified (parallel call)", customerSms });
+  }
+
   const { data: engRow, error: engErr } = await admin
     .from("engineers")
     .select("id, profile:profiles(name, phone, email)")
@@ -461,7 +476,7 @@ Deno.serve(async (req) => {
   // retry-spam the engineer forever. Failures are still visible in this
   // function's own logs (Supabase Dashboard -> Edge Functions ->
   // notify-assignment -> Logs) for you to follow up on.
-  await admin.from("bookings").update({ notified_engineer_id: engineerId }).eq("id", record.id);
+  // (notified_engineer_id was already set by the claim above.)
 
   return json({ engineerId, email: emailResult, sms: smsResult, customerSms, customerEngineer });
 });
