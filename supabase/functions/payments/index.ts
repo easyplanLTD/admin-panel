@@ -33,8 +33,9 @@
 //   STRIPE_CONNECT_WEBHOOK_SECRET     whsec_... for the "Connected accounts" endpoint
 //   SITE_URL        (optional)        defaults to https://easyrepair.co.uk
 //   PORTAL_URL      (optional)        where engineers return after Stripe onboarding
-//   RESEND_API_KEY + EMAIL_FROM       (optional) customer emails
-//   TWILIO_ACCOUNT_SID + TWILIO_AUTH_TOKEN + TWILIO_FROM   (optional) customer texts
+//   RESEND_API_KEY + NOTIFY_FROM_EMAIL (or EMAIL_FROM)      customer emails (same as notify-assignment)
+//   TWILIO_ACCOUNT_SID + TWILIO_AUTH_TOKEN + TWILIO_FROM_NUMBER   customer texts (same as notify-assignment)
+//   TEST_NOTIFY_PHONE / TEST_NOTIFY_EMAIL (optional) where test bookings' texts/emails go
 //   CRON_SECRET     (optional)        lets a scheduler call the "daily" action
 
 import Stripe from "npm:stripe@17.7.0";
@@ -198,32 +199,76 @@ const partsUrl = async (id: string) => `${SITE_URL}/approve-parts/?b=${id}&t=${a
 // Both optional: without the secrets the link is still saved on the booking
 // and shown in the Portal and FixFlow, it just isn't sent automatically.
 
+// Uses the same secrets as notify-assignment / submit-booking.
+let lastSendError = "";
+// Test bookings never contact the made-up customer details on them. Messages go
+// to TEST_NOTIFY_PHONE / TEST_NOTIFY_EMAIL instead (your own), or are skipped.
+const TEST_PHONE = Deno.env.get("TEST_NOTIFY_PHONE") || "";
+const TEST_EMAIL = Deno.env.get("TEST_NOTIFY_EMAIL") || "";
+function contactFor(b: any) {
+  if (b?.is_test) return { email: TEST_EMAIL, phone: TEST_PHONE };
+  return { email: b?.email || "", phone: b?.phone || "" };
+}
+function isFakeContact(v: string) {
+  const t = String(v || "").toLowerCase().replace(/[^\da-z@.+]/g, "");
+  return t.endsWith(".internal") || /^(\+44|0044|0)7700900\d{3}$/.test(t);
+}
+function esc(t: string) {
+  return String(t).replace(/[&<>"]/g, (ch) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" } as any)[ch]);
+}
+function emailHtml(body: string) {
+  // Turn the first link in the message into a button; keep the rest as text.
+  const link = body.match(/https?:\/\/\S+/)?.[0] || "";
+  const text = esc(link ? body.replace(link, "").replace(/\s*here:\s*$/i, ".").trim() : body).replace(/\n/g, "<br>");
+  const button = link
+    ? `<p style="margin:24px 0"><a href="${esc(link)}" style="background:#0b5cff;color:#fff;text-decoration:none;padding:12px 22px;border-radius:6px;font-weight:600;display:inline-block">Open secure link</a></p><p style="font-size:12px;color:#666">Or copy this link: ${esc(link)}</p>`
+    : "";
+  return `<div style="font-family:Arial,Helvetica,sans-serif;font-size:15px;line-height:1.5;color:#222;max-width:560px">${text}${button}<p style="font-size:12px;color:#666;margin-top:28px">EasyRepair &middot; easyrepair.co.uk</p></div>`;
+}
 async function sendEmail(to: string, subject: string, body: string) {
-  const key = Deno.env.get("RESEND_API_KEY"), from = Deno.env.get("EMAIL_FROM");
-  if (!key || !from || !to) return false;
+  const key = Deno.env.get("RESEND_API_KEY");
+  const from = Deno.env.get("EMAIL_FROM") || Deno.env.get("NOTIFY_FROM_EMAIL") || "bookings@mail.easyrepair.co.uk";
+  if (!key) { lastSendError = "Emails aren't set up (RESEND_API_KEY is missing)."; return false; }
+  if (!to) { lastSendError = "There's no email address on this booking (for test bookings, set TEST_NOTIFY_EMAIL)."; return false; }
+  if (isFakeContact(to)) { lastSendError = "That's a made-up test email address, so nothing was sent."; return false; }
   const r = await fetch("https://api.resend.com/emails", {
     method: "POST",
     headers: { Authorization: `Bearer ${key}`, "Content-Type": "application/json" },
-    body: JSON.stringify({ from, to, subject, text: body }),
+    body: JSON.stringify({ from: from.includes("<") ? from : `EasyRepair <${from}>`, to, subject, text: body, html: emailHtml(body) }),
   });
+  if (!r.ok) {
+    const j: any = await r.json().catch(() => ({}));
+    lastSendError = `The email couldn't be sent: ${j.message || r.status}`;
+    console.error("resend", r.status, JSON.stringify(j));
+  }
   return r.ok;
 }
 async function sendSms(to: string, body: string) {
-  const sid = Deno.env.get("TWILIO_ACCOUNT_SID"), tok = Deno.env.get("TWILIO_AUTH_TOKEN"), from = Deno.env.get("TWILIO_FROM");
-  if (!sid || !tok || !from || !to) return false;
-  let num = String(to).replace(/[^\d+]/g, "");
-  if (num.startsWith("0")) num = "+44" + num.slice(1);
+  const sid = Deno.env.get("TWILIO_ACCOUNT_SID"), tok = Deno.env.get("TWILIO_AUTH_TOKEN");
+  const from = Deno.env.get("TWILIO_FROM_NUMBER") || Deno.env.get("TWILIO_FROM") || Deno.env.get("TWILIO_PHONE_NUMBER");
+  if (!sid || !tok || !from) { lastSendError = "Texts aren't set up (Twilio secrets are missing)."; return false; }
+  if (isFakeContact(to)) { lastSendError = "That's a made-up test number, so nothing was sent."; return false; }
+  let num = String(to || "").replace(/[^\d+]/g, "");
+  if (num.startsWith("00")) num = "+" + num.slice(2);
+  else if (num.startsWith("0")) num = "+44" + num.slice(1);
+  else if (num && !num.startsWith("+")) num = "+" + num;
+  if (num.length < 10) { lastSendError = "There's no valid mobile number on this booking (for test bookings, set TEST_NOTIFY_PHONE)."; return false; }
   const r = await fetch(`https://api.twilio.com/2010-04-01/Accounts/${sid}/Messages.json`, {
     method: "POST",
     headers: { Authorization: "Basic " + btoa(`${sid}:${tok}`), "Content-Type": "application/x-www-form-urlencoded" },
     body: new URLSearchParams({ To: num, From: from, Body: body }),
   });
+  if (!r.ok) {
+    const j: any = await r.json().catch(() => ({}));
+    lastSendError = `The text couldn't be sent: ${j.message || r.status}`;
+    console.error("twilio", r.status, JSON.stringify(j));
+  }
   return r.ok;
 }
 async function notifyCustomer(b: any, subject: string, body: string) {
   const [email, sms] = await Promise.all([
-    sendEmail(b.email, subject, body).catch(() => false),
-    sendSms(b.phone, body).catch(() => false),
+    sendEmail(contactFor(b).email, subject, body).catch(() => false),
+    sendSms(contactFor(b).phone, body).catch(() => false),
   ]);
   return { email, sms };
 }
@@ -517,9 +562,9 @@ async function takePayment(c: Caller, body: any) {
   if (method === "sms" || method === "email") {
     const msg = `EasyRepair: thank you, your ${b.appliance || "appliance"} job (${ref(b)}) is done. Please pay ${gbp(m.total)} securely here: ${url}`;
     const ok = method === "sms"
-      ? await sendSms(b.phone, msg).catch(() => false)
-      : await sendEmail(b.email, `Payment for your EasyRepair job ${ref(b)}`, msg).catch(() => false);
-    if (!ok) return { url, totalPence: m.total, sent: false, error: method === "sms" ? "The text couldn't be sent (texts aren't set up yet, or the number is missing). Use the QR code or phone payment instead." : "The email couldn't be sent (emails aren't set up yet, or the address is missing). Use the QR code or phone payment instead." };
+      ? await sendSms(contactFor(b).phone, msg).catch(() => false)
+      : await sendEmail(contactFor(b).email, `Payment for your EasyRepair job ${ref(b)}`, msg).catch(() => false);
+    if (!ok) return { url, totalPence: m.total, sent: false, error: `${lastSendError || (method === "sms" ? "The text couldn't be sent." : "The email couldn't be sent.")} Use the QR code or phone payment instead.` };
     return { url, totalPence: m.total, sent: true };
   }
   if (method === "qr") {
