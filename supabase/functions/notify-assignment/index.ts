@@ -45,6 +45,10 @@ const TWILIO_AUTH_TOKEN = Deno.env.get("TWILIO_AUTH_TOKEN");
 const TWILIO_FROM_NUMBER = Deno.env.get("TWILIO_FROM_NUMBER");
 const WEBHOOK_SECRET = Deno.env.get("BOOKING_WEBHOOK_SECRET");
 const NOTIFY_FROM_EMAIL = Deno.env.get("NOTIFY_FROM_EMAIL") || "bookings@easyrepair.co.uk";
+// Test bookings (is_test) never text/email the made-up customer or engineer
+// details on them -- everything goes to these instead, or is skipped if unset.
+const TEST_NOTIFY_PHONE = Deno.env.get("TEST_NOTIFY_PHONE") || null;
+const TEST_NOTIFY_EMAIL = Deno.env.get("TEST_NOTIFY_EMAIL") || null;
 
 // Flat callout fee quoted to the customer in the "Request received" SMS
 // below. Not stored anywhere in the DB (the `pricing` table is keyed by
@@ -399,6 +403,11 @@ Deno.serve(async (req) => {
 
   const record = payload?.record;
   if (!record) return json({ error: "No record in payload" }, 400);
+  const isTest = record.is_test === true;
+  if (isTest) {
+    record.phone = TEST_NOTIFY_PHONE;
+    record.email = TEST_NOTIFY_EMAIL;
+  }
 
   // "Request received" SMS to the CUSTOMER -- fires once, right when the
   // booking row is first created (payload.type === "INSERT" only). This is
@@ -436,8 +445,8 @@ Deno.serve(async (req) => {
 
   const engineerName = engRow.profile?.name;
   const [emailResult, smsResult] = await Promise.all([
-    sendEmail(engRow.profile?.email, engineerName, record),
-    sendSms(engRow.profile?.phone, record),
+    sendEmail(isTest ? TEST_NOTIFY_EMAIL : engRow.profile?.email, engineerName, record),
+    sendSms(isTest ? TEST_NOTIFY_PHONE : engRow.profile?.phone, record),
   ]);
 
   // Customer gets the engineer's name + number. On INSERT this is already in
