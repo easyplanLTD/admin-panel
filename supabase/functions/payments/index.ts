@@ -216,7 +216,7 @@ function isFakeContact(v: string) {
 function esc(t: string) {
   return String(t).replace(/[&<>"]/g, (ch) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" } as any)[ch]);
 }
-const LOGO_URL = "https://nqubqtsjkhfswlrtjzia.supabase.co/storage/v1/object/public/branding/logo-easyrepair-2026.png";
+const LOGO_URL = "https://nqubqtsjkhfswlrtjzia.supabase.co/storage/v1/object/public/branding/easyrepair-logo-email.png";
 function emailHtml(body: string, subject = "") {
   // Logo on top, the message, then the first link in it as a button.
   const link = body.match(/https?:\/\/\S+/)?.[0] || "";
@@ -226,7 +226,7 @@ function emailHtml(body: string, subject = "") {
     ? `<p style="margin:24px 0"><a href="${esc(link)}" style="background:#0b5cff;color:#fff;text-decoration:none;padding:12px 22px;border-radius:6px;font-weight:600;display:inline-block">${label}</a></p><p style="font-size:12px;color:#666">Or copy this link: ${esc(link)}</p>`
     : "";
   return `<div style="font-family:Arial,Helvetica,sans-serif;font-size:15px;line-height:1.5;color:#222;max-width:560px">`
-    + `<img src="${LOGO_URL}" alt="Easy Repair" width="180" style="display:block;border:0;margin:0 0 20px">`
+    + `<img src="${LOGO_URL}" alt="EasyRepair" width="200" height="44" style="display:block;border:0;margin:0 0 20px;width:200px;height:44px">`
     + `${text}${button}<p style="font-size:12px;color:#666;margin-top:28px">EasyRepair &middot; easyrepair.co.uk</p></div>`;
 }
 async function sendEmail(to: string, subject: string, body: string) {
