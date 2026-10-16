@@ -1049,16 +1049,27 @@ async function webhook(req: Request) {
 
 // ------------------------------------------------------- customer pay link
 
+// Customers always land on easyrepair.co.uk/payment-complete/ (a WordPress
+// page) after using a payment link; ?status= picks the message it shows.
+function doneUrl(status: string, b?: any) {
+  const q = new URLSearchParams({ status });
+  if (b) q.set("ref", ref(b));
+  return `${SITE_URL}/payment-complete/?${q}`;
+}
+function donePage(status: string, b?: any) {
+  return Response.redirect(doneUrl(status, b), 303);
+}
+
 async function payPage(url: URL) {
   const id = url.searchParams.get("pay") || "";
-  if (!(await verify(`pay:${id}`, url.searchParams.get("t")))) return text("This payment link isn't valid. Please contact EasyRepair.", 403);
+  if (!(await verify(`pay:${id}`, url.searchParams.get("t")))) return donePage("invalid");
   const { data: b } = await db.from("bookings").select("*").eq("id", id).maybeSingle();
-  if (!b) return text("Booking not found. Please contact EasyRepair.", 404);
-  if (["paid", "refunded", "part_refunded"].includes(b.payment_status)) return Response.redirect(`${SITE_URL}/?payment=already-paid`, 303);
-  if (b.parts_approval_status === "pending" && b.pending_outcome !== "Beyond Repair") return text("Your engineer has quoted parts that need your approval first. Please use the approval link we sent you, or call EasyRepair.", 409);
+  if (!b) return donePage("invalid");
+  if (["paid", "refunded", "part_refunded"].includes(b.payment_status)) return donePage("paid", b);
+  if (b.parts_approval_status === "pending" && b.pending_outcome !== "Beyond Repair") return donePage("parts", b);
   const eng = await engineer(b.engineer_id);
   if (eng?.stripe_account_id && !eng.stripe_charges_enabled) eng.stripe_charges_enabled = !!(await refreshAccountById(eng.stripe_account_id)).charges_enabled;
-  if (!eng?.stripe_account_id || !eng.stripe_charges_enabled) return text("Payment isn't available for this job yet. Please contact EasyRepair.", 409);
+  if (!eng?.stripe_account_id || !eng.stripe_charges_enabled) return donePage("unavailable", b);
   const s = await settings();
   const m = jobCharge(b, s, await overrides());
   const rec = await recoveriesFor(eng.id, Math.max(0, m.engineerShare - estimateStripeFee(m.total)), b.id);
@@ -1078,8 +1089,8 @@ async function payPage(url: URL) {
         recovery_ids: rec.ids.join(","), recovery_pence: String(rec.sum),
       },
     },
-    success_url: `${SITE_URL}/?payment=success`,
-    cancel_url: `${SITE_URL}/?payment=cancelled`,
+    success_url: doneUrl("success", b),
+    cancel_url: await payUrl(b.id),
     expires_at: Math.floor(Date.now() / 1000) + 3600,
   }, { stripeAccount: eng.stripe_account_id });
   await updateBooking(b.id, { stripe_charge_account_id: eng.stripe_account_id, total_pence: m.total, commission_pence: m.commission, engineer_share_pence: m.engineerShare });
