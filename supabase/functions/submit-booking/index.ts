@@ -72,7 +72,7 @@ async function sendBookingReceivedEmail(to, booking) {
     'The callout fee is a flat GBP ' + (booking.protectionPlan ? '79.99' : '99.99') + ', covering the engineer visit and diagnosis. Any parts needed will be quoted before work begins.',
     'Thanks, Easy Repair',
   ].filter(Boolean);
-  const html = '<div style="font-family: Arial, Helvetica, sans-serif; font-size: 15px; color: #111111; line-height: 1.6;"><p>' + lines.join('</p><p>') + '</p><img src="https://easyrepair.co.uk/wp-content/uploads/2026/09/image.png" alt="Easy Repair" width="160" style="display:block;margin-top:20px;border:0;"></div>';
+  const html = '<div style="font-family: Arial, Helvetica, sans-serif; font-size: 15px; color: #111111; line-height: 1.6;"><p>' + lines.join('</p><p>') + '</p><img src="https://nqubqtsjkhfswlrtjzia.supabase.co/storage/v1/object/public/branding/easyrepair-logo-email.png" alt="EasyRepair" width="200" height="44" style="display:block;border:0;width:200px;height:44px;margin-top:20px;"></div>';
 
   const res = await fetch('https://api.resend.com/emails', {
     method: 'POST',
