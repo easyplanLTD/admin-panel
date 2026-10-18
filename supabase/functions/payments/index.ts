@@ -349,6 +349,7 @@ async function onboardingLink(c: Caller, body: any) {
           mcc: "7629", // electrical and small appliance repair
           capabilities: { card_payments: { requested: true } },
           support: { url: SITE_URL },
+          statement_descriptor: { descriptor: BRAND.descriptor, prefix: BRAND.descriptorPrefix },
         },
         // Lets EasyRepair transfer the engineer's share of no-show fees.
         recipient: { capabilities: { stripe_balance: { stripe_transfers: { requested: true } } } },
@@ -520,10 +521,19 @@ async function applyBrandingTo(accountId: string) {
     configuration: {
       merchant: {
         branding: { logo: logoId, icon: iconId, primary_color: BRAND.primary, secondary_color: BRAND.secondary },
-        statement_descriptor: { descriptor: BRAND.descriptor, prefix: BRAND.descriptorPrefix },
       },
     },
   });
+  // Statement wording is set when the account is created. Once an engineer has
+  // been through Stripe's setup, Stripe may not let us change it, so this is
+  // best effort and never stops the logo and colours being applied.
+  try {
+    await stripeV2(`/v2/core/accounts/${accountId}`, {
+      configuration: { merchant: { statement_descriptor: { prefix: BRAND.descriptorPrefix } } },
+    });
+  } catch (e) {
+    console.log("statement prefix not changed", accountId, (e as Error).message);
+  }
 }
 
 // Never blocks a payment: if branding fails it's logged and retried next time.
