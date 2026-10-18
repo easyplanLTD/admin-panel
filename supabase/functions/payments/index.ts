@@ -36,6 +36,7 @@
 //   RESEND_API_KEY + NOTIFY_FROM_EMAIL (or EMAIL_FROM)      customer emails (same as notify-assignment)
 //   TWILIO_ACCOUNT_SID + TWILIO_AUTH_TOKEN + TWILIO_FROM_NUMBER   customer texts (same as notify-assignment)
 //   TEST_NOTIFY_PHONE / TEST_NOTIFY_EMAIL (optional) where test bookings' texts/emails go
+//   STRIPE_PUBLISHABLE_KEY            pk_test_... / pk_live_... for the website card form
 //   CRON_SECRET     (optional)        lets a scheduler call the "daily" action
 
 import Stripe from "npm:stripe@17.7.0";
@@ -436,11 +437,38 @@ async function syncAccount(acct: Stripe.Account) {
 // a SetupIntent client secret for Stripe's card form; the webhook stores the
 // card on the booking once the customer has confirmed it.
 
+// Public: what the website booking form needs to show the card box. The
+// publishable key is public by design (it can only create card forms, not
+// charge anything). Amounts come from FixFlow's payment settings so the
+// wording on the form always matches what will actually be charged.
+async function cardConfig(_c: Caller, _body: any) {
+  const s = await settings();
+  return {
+    publishableKey: Deno.env.get("STRIPE_PUBLISHABLE_KEY") || null,
+    live: !!s.payments_live,
+    testMode: TEST_MODE,
+    calloutProtectionPence: Number(s.callout_protection_pence),
+    calloutRepairOnlyPence: Number(s.callout_repair_only_pence),
+    planMonthlyPence: Number((s.plan_monthly_tiers || [799])[0]),
+    planTermMonths: Number(s.plan_term_months || 12),
+    adminFeePence: Number(s.admin_fee_pence),
+    lateCancelFeePence: Number(s.late_cancel_fee_pence),
+    freeCancelHours: Number(s.free_cancel_hours),
+    noShowFeePence: Number(s.no_show_fee_pence),
+  };
+}
+
 async function startCardSetup(_c: Caller, body: any) {
   const b = await booking(body.bookingId);
   if ((b.email || "").trim().toLowerCase() !== String(body.email || "").trim().toLowerCase()) fail("Booking not found", 404);
   if (Date.now() - new Date(b.created_at).getTime() > 6 * 3600e3) fail("This booking is too old to add a card here. Please call us.");
   if (b.stripe_payment_method_id) fail("A card is already saved for this booking.");
+  // Customer gave up on saving a card on the booking form: pay by link after the repair.
+  if (body.skipCard) {
+    if (b.wants_protection_plan) fail("A Protection Plan needs a card.");
+    await updateBooking(b.id, { payment_timing: "after" });
+    return { ok: true, paymentTiming: "after" };
+  }
   let customerId = b.stripe_customer_id;
   if (!customerId) {
     const cust = await stripe.customers.create({
@@ -1248,9 +1276,10 @@ const ACTIONS: Record<string, (c: Caller, body: any) => Promise<unknown>> = {
   cancel_plan: cancelPlan,
   daily: (c) => daily(c),
   test_attach_card: testAttachCard,
+  card_config: cardConfig,                // public (booking form)
   apply_branding: applyBranding,          // FixFlow (staff)
 };
-const PUBLIC = new Set(["start_card_setup", "parts_quote", "parts_respond"]);
+const PUBLIC = new Set(["start_card_setup", "card_config", "parts_quote", "parts_respond"]);
 
 Deno.serve(async (req) => {
   if (req.method === "OPTIONS") return new Response("ok", { headers: cors });
