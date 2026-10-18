@@ -484,15 +484,17 @@ const BRAND = {
   descriptorPrefix: "EASYREPAIR",   // max 10 characters
   descriptor: "EASYREPAIR",          // max 22 characters
 };
-let brandFiles: { logo: Uint8Array; icon: Uint8Array } | null = null;
+let brandFiles: { logo: string; icon: string } | null = null;   // Stripe file IDs
 
-async function uploadBrandFile(accountId: string, bytes: Uint8Array, purpose: string, name: string) {
+// Accounts v2 look the logo/icon up on EasyRepair's own (platform) account, so
+// the files are uploaded there once, without a Stripe-Account header.
+async function uploadBrandFile(bytes: Uint8Array, purpose: string, name: string) {
   const form = new FormData();
   form.append("purpose", purpose);
   form.append("file", new Blob([bytes], { type: "image/png" }), name);
   const r = await fetch("https://files.stripe.com/v1/files", {
     method: "POST",
-    headers: { Authorization: `Bearer ${STRIPE_KEY}`, "Stripe-Account": accountId },
+    headers: { Authorization: `Bearer ${STRIPE_KEY}` },
     body: form,
   });
   const out = await r.json().catch(() => ({}));
@@ -507,12 +509,13 @@ async function applyBrandingTo(accountId: string) {
       if (!r.ok) throw new Error(`Couldn't load ${u}`);
       return new Uint8Array(await r.arrayBuffer());
     }));
-    brandFiles = { logo, icon };
+    const [logoId, iconId] = await Promise.all([
+      uploadBrandFile(logo, "business_logo", "easyrepair-logo.png"),
+      uploadBrandFile(icon, "business_icon", "easyrepair-icon.png"),
+    ]);
+    brandFiles = { logo: logoId, icon: iconId };
   }
-  const [logoId, iconId] = await Promise.all([
-    uploadBrandFile(accountId, brandFiles.logo, "business_logo", "easyrepair-logo.png"),
-    uploadBrandFile(accountId, brandFiles.icon, "business_icon", "easyrepair-icon.png"),
-  ]);
+  const logoId = brandFiles.logo, iconId = brandFiles.icon;
   await stripeV2(`/v2/core/accounts/${accountId}`, {
     configuration: {
       merchant: {
