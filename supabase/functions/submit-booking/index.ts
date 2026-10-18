@@ -264,8 +264,11 @@ Deno.serve(async (req) => {
   const {
     name, phone, email, postcode, address,
     appliance, brand, applianceAge, problem, preferredCallTime,
-      sourceUrl, referrerUrl,
+      sourceUrl, referrerUrl, paymentTiming,
   } = body || {};
+  // Test bookings from the website (form opened with ?erpay=test) are marked
+  // is_test, only go to test engineers, and never message real contact details.
+  const isTest = body?.test === true;
 
   if (!name || !phone || !postcode || !appliance) {
     return json({ error: "name, phone, postcode and appliance are required" }, 400);
@@ -277,7 +280,7 @@ Deno.serve(async (req) => {
 
   const { data: engineers, error: engErr } = await admin
     .from("engineers")
-    .select("id, postcodes, appliance_types, brand_exclusions, active, stats_completed, stats_ber, working_hours, id_document_path, insurance_document_path, insurance_expiry_date, profile:profiles(archived_at, must_change_password, terms_accepted_at, name, phone)");
+    .select("id, postcodes, appliance_types, brand_exclusions, active, stats_completed, stats_ber, working_hours, id_document_path, insurance_document_path, insurance_expiry_date, profile:profiles(archived_at, must_change_password, terms_accepted_at, name, phone, is_test)");
   if (engErr) return json({ error: "Could not look up engineers" }, 500);
 
   const { data: activeBookings, error: bookingsErr } = await admin
@@ -293,7 +296,9 @@ Deno.serve(async (req) => {
   }
 
   const bookingInput = { postcode, appliance, brand };
-  const match = pickEngineer(bookingInput, engineers || [], activeCounts);
+  // Real bookings never go to test engineers, and test bookings only go to them.
+  const pool = (engineers || []).filter((e) => !!e.profile?.is_test === isTest);
+  const match = pickEngineer(bookingInput, pool, activeCounts);
 
   const { data: inserted, error: insertErr } = await admin
     .from("bookings")
@@ -325,6 +330,10 @@ Deno.serve(async (req) => {
       // 0006_service_plans.sql) creates the matching service_plans row
       // automatically the moment this insert lands, if true.
       wants_protection_plan: protectionPlan,
+      // "before" = card saved on the form (charged after the repair),
+      // "after" = customer chose to pay by link after the repair.
+      payment_timing: paymentTiming === "before" || paymentTiming === "after" ? paymentTiming : null,
+      is_test: isTest,
     })
     .select("id, booking_ref")
     .single();
@@ -369,6 +378,7 @@ Deno.serve(async (req) => {
   }
 
   return json({
+    id: inserted.id, // used by the form to save the customer's card (payments start_card_setup)
     bookingId: inserted.booking_ref || ("#" + inserted.id),
     assigned: !!match,
     protectionPlan,
