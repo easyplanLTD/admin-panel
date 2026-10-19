@@ -285,6 +285,12 @@ type Caller = { userId: string | null; role: string | null; engineerId: string |
 async function caller(req: Request, body: any): Promise<Caller> {
   const cron = Deno.env.get("CRON_SECRET");
   if (cron && body?.cronSecret === cron) return { userId: null, role: "service", engineerId: null, service: true };
+  // The daily schedule (pg_cron, migration 0017) sends a secret that only
+  // exists in the database's Vault; the database checks it for us.
+  if (typeof body?.cronSecret === "string" && body.cronSecret.length >= 32) {
+    const { data: ok } = await db.rpc("payments_cron_secret_ok", { p: body.cronSecret });
+    if (ok === true) return { userId: null, role: "service", engineerId: null, service: true };
+  }
   const jwt = (req.headers.get("Authorization") || "").replace(/^Bearer /i, "");
   if (jwt === SERVICE_ROLE_KEY) return { userId: null, role: "service", engineerId: null, service: true };
   if (!jwt) return { userId: null, role: null, engineerId: null, service: false };
@@ -1004,7 +1010,9 @@ async function daily(c: Caller) {
   const remindBy = addDays(now, Number(s.plan_renewal_reminder_days || 30)).toISOString();
   const { data: due } = await db.from("service_plans").select("*").eq("status", "active")
     .not("stripe_subscription_id", "is", null).lte("next_renewal_at", remindBy).is("renewal_reminder_sent_at", null);
+  const errors: string[] = [];
   for (const p of due || []) {
+    try {
     const interval = p.pending_interval || p.billing_interval || "month";
     const price = planPrice(s, interval, p.appliance_count || 1);
     const end = new Date(p.next_renewal_at).toLocaleDateString("en-GB");
@@ -1013,11 +1021,13 @@ async function daily(c: Caller) {
       `If you don't want it to renew, contact us before then. Cancelling during a term costs ${gbp(s.plan_cancel_fee_pence)}.`);
     await db.from("service_plans").update({ renewal_reminder_sent_at: now.toISOString() }).eq("id", p.id);
     out.reminders++;
+    } catch (e: any) { errors.push(`reminder ${p.id}: ${e.message}`); }
   }
 
   const { data: ending } = await db.from("service_plans").select("*").eq("status", "active")
     .not("stripe_subscription_id", "is", null).lte("next_renewal_at", now.toISOString());
   for (const p of ending || []) {
+    try {
     const start = new Date(p.next_renewal_at);
     const end = addMonths(start, Number(s.plan_term_months || 12));
     const patch: Record<string, unknown> = {
@@ -1033,6 +1043,7 @@ async function daily(c: Caller) {
     await db.from("service_plans").update(patch).eq("id", p.id);
     await db.from("plan_changes").insert({ plan_id: p.id, summary: `Renewed for term ${patch.term_number} (to ${end.toLocaleDateString("en-GB")})` });
     out.renewed++;
+    } catch (e: any) { errors.push(`renewal ${p.id}: ${e.message}`); }
   }
 
   const cutoff = addDays(now, -Number(s.recovery_invoice_days || 30)).toISOString();
@@ -1041,7 +1052,9 @@ async function daily(c: Caller) {
     await db.from("commission_recoveries").update({ status: "invoiced", invoiced_at: now.toISOString(), updated_at: now.toISOString() }).eq("id", r.id);
     out.invoiced++;
   }
-  return out;
+  if (errors.length) console.error("daily errors", errors);
+  console.log("daily run", JSON.stringify(out));
+  return { ...out, errors };
 }
 
 // ------------------------------------------------------------------ webhooks
