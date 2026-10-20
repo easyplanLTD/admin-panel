@@ -250,6 +250,7 @@ export function mapPaymentFields(row = {}) {
     stripePaymentIntentId: row.stripe_payment_intent_id || null,
     stripeAccountId: row.stripe_charge_account_id || null,
     stripeLivemode: row.stripe_livemode ?? null,
+    stripeDashboardUrl: row.stripe_dashboard_url || null,
     paidVia: row.paid_via || null,
     cardBrand: row.card_brand || null,
     cardLast4: row.card_last4 || null,
@@ -266,11 +267,13 @@ export function cardLabel(job) {
 }
 
 // Opens this payment in EasyRepair's Stripe dashboard (it lives on the
-// engineer's connected account). Older test payments have no livemode flag.
+// engineer's connected account). The payments function saves the exact link;
+// the fallback (no EasyRepair account in the path) may need switching account.
 export function stripePaymentUrl(job) {
+  if (job?.stripeDashboardUrl) return job.stripeDashboardUrl; // exact link saved by the payments function
   if (!job?.stripePaymentIntentId || !job?.stripeAccountId) return null;
   const mode = job.stripeLivemode === true ? "" : "test/";
-  return `https://dashboard.stripe.com/${job.stripeAccountId}/${mode}payments/${job.stripePaymentIntentId}`;
+  return `https://dashboard.stripe.com/${mode}connect/accounts/${job.stripeAccountId}/payments/${job.stripePaymentIntentId}`;
 }
 
 // Jobs paid through Stripe (card saved at booking, Pay after repair, or
