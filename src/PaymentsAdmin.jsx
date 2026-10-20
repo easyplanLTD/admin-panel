@@ -25,6 +25,7 @@ import {
   mergeSettings, jobMoney, penceToGBP, poundsToPence, pctLabel, planPricePence, cancellationFee,
   planCancellationFee, paymentRoute, ROUTE_LABELS, PAYMENT_STATUS_LABELS, PARTS_STATUS_LABELS,
   FEE_BEARER_LABELS, STRIPE_STATUS_LABELS, jobRef,
+  PAID_VIA_LABELS, cardLabel, stripePaymentUrl,
 } from "./paymentsShared";
 
 // ─── data hooks ─────────────────────────────────────────────────────────────
@@ -609,6 +610,21 @@ export function JobPaymentPanel({ job, engineers = [], isOwner, onChanged }) {
         {job.partsApprovalStatus === "pending" && ` If the customer approves the parts: total ${penceToGBP(mIfApproved.total)}, engineer ${penceToGBP(mIfApproved.engineerNet)}.`}
         {job.paidAt && ` Paid ${fmtDateTime(job.paidAt)}.`}
       </div>
+
+      {/* payment record (once Stripe has confirmed the payment) */}
+      {job.stripePaymentIntentId && ["paid", "refunded", "part_refunded"].includes(job.paymentStatus) && (
+        <div style={{ marginTop: 12, padding: 10, borderRadius: 8, background: "rgba(255,255,255,0.04)", border: `1px solid ${C.border}` }}>
+          <div style={label()}>Payment record</div>
+          <Row k="Paid" v={job.paidAt ? fmtDateTime(job.paidAt) : "\u2014"} />
+          <Row k="How" v={[PAID_VIA_LABELS[job.paidVia] || "Stripe", cardLabel(job)].filter(Boolean).join(" \u00b7 ")} />
+          <Row k="Stripe reference" v={<span style={{ fontFamily: "monospace", fontSize: 12, wordBreak: "break-all" }}>{job.stripePaymentIntentId}</span>} />
+          {job.stripeLivemode === false || job.stripeLivemode == null ? <div style={{ fontSize: 11, color: C.light, marginTop: 2 }}>Test payment (Stripe sandbox)</div> : null}
+          <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginTop: 8 }}>
+            <Btn variant="ghost" sm onClick={() => navigator.clipboard?.writeText(job.stripePaymentIntentId)}>Copy reference</Btn>
+            {stripePaymentUrl(job) && <Btn variant="ghost" sm onClick={() => window.open(stripePaymentUrl(job), "_blank", "noopener")}>View in Stripe</Btn>}
+          </div>
+        </div>
+      )}
 
       {/* customer's payment link (Pay after repair, or a declined card) */}
       {job.paymentLinkUrl && !["paid", "refunded", "part_refunded"].includes(job.paymentStatus) && (

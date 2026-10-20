@@ -246,7 +246,31 @@ export function mapPaymentFields(row = {}) {
     refundSource: row.refund_source || null,
     pendingOutcome: row.pending_outcome || null,       // outcome picked on Take payment, applied once paid
     awaitingPaymentSince: row.awaiting_payment_since || null,
+    // Payment record (set by the payments function when Stripe confirms payment)
+    stripePaymentIntentId: row.stripe_payment_intent_id || null,
+    stripeAccountId: row.stripe_charge_account_id || null,
+    stripeLivemode: row.stripe_livemode ?? null,
+    paidVia: row.paid_via || null,
+    cardBrand: row.card_brand || null,
+    cardLast4: row.card_last4 || null,
   };
+}
+
+export const PAID_VIA_LABELS = { saved_card: "Saved card", online: "Online (payment link, QR or phone)" };
+
+// "Visa •••• 4242" (or "" if Stripe didn't give us the card).
+export function cardLabel(job) {
+  if (!job?.cardLast4) return "";
+  const brand = { amex: "Amex", mastercard: "Mastercard", visa: "Visa", discover: "Discover", diners: "Diners", jcb: "JCB", unionpay: "UnionPay" }[job.cardBrand] || (job.cardBrand ? job.cardBrand[0].toUpperCase() + job.cardBrand.slice(1) : "Card");
+  return `${brand} \u2022\u2022\u2022\u2022 ${job.cardLast4}`;
+}
+
+// Opens this payment in EasyRepair's Stripe dashboard (it lives on the
+// engineer's connected account). Older test payments have no livemode flag.
+export function stripePaymentUrl(job) {
+  if (!job?.stripePaymentIntentId || !job?.stripeAccountId) return null;
+  const mode = job.stripeLivemode === true ? "" : "test/";
+  return `https://dashboard.stripe.com/${job.stripeAccountId}/${mode}payments/${job.stripePaymentIntentId}`;
 }
 
 // Jobs paid through Stripe (card saved at booking, Pay after repair, or
