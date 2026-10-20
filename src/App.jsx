@@ -2820,10 +2820,14 @@ export default function App() {
   //
   // Needs `bookings` added to the `supabase_realtime` publication once --
   // see supabase/migrations/0004_bookings_realtime.sql.
+  // Bumped to tear down and rebuild the channel if it ever ends up closed or
+  // errored (see the subscribe() status handler below).
+  const [rtEpoch,setRtEpoch] = useState(0);
   useEffect(()=>{
     if(!currentUser) return;
+    let disposed = false, retry = null;
     const channel = supabase
-      .channel(`bookings-sync-${currentUser.id}`)
+      .channel(`bookings-sync-${currentUser.id}-${rtEpoch}`)
       .on("postgres_changes",{event:"INSERT",schema:"public",table:"bookings"},(payload)=>{
         const row = mapBookingRow(payload.new||{});
         setJobs(prev=> prev.some(j=>j.id===row.id) ? prev : [row,...prev]);
@@ -2833,16 +2837,31 @@ export default function App() {
       })
       .on("postgres_changes",{event:"UPDATE",schema:"public",table:"bookings"},(payload)=>{
         const row = mapBookingRow(payload.new||{});
-        setJobs(prev=> prev.map(j=>j.id===row.id ? row : j));
+        // Upsert, not just replace: a row we didn't have yet (e.g. missed
+        // while the socket was down) still shows up.
+        setJobs(prev=> prev.some(j=>j.id===row.id) ? prev.map(j=>j.id===row.id ? row : j) : [row,...prev]);
       })
       .on("postgres_changes",{event:"DELETE",schema:"public",table:"bookings"},(payload)=>{
         const oldId = payload.old?.id;
         if(oldId==null) return;
         setJobs(prev=> prev.filter(j=>j.id!==oldId));
       })
-      .subscribe();
-    return () => { supabase.removeChannel(channel); };
-  },[currentUser?.id]);
+      .subscribe((status)=>{
+        if(disposed) return;
+        // SUBSCRIBED fires on the first join AND on every automatic rejoin
+        // after the socket dropped (sleep, Wi-Fi blip, background-tab
+        // throttling). Anything that changed while we were disconnected was
+        // never sent to us, so re-pull the list to catch up.
+        if(status==="SUBSCRIBED") loadBookings();
+        // A channel that ends up closed/errored/timed out would otherwise stay
+        // dead until a page reload -- rebuild it after a short pause.
+        if(status==="CLOSED"||status==="CHANNEL_ERROR"||status==="TIMED_OUT"){
+          clearTimeout(retry);
+          retry = setTimeout(()=>{ if(!disposed) setRtEpoch(e=>e+1); },5000);
+        }
+      });
+    return () => { disposed = true; clearTimeout(retry); supabase.removeChannel(channel); };
+  },[currentUser?.id, rtEpoch]);
 
   // ── LIVE-SYNC SAFETY NET ──────────────────────────────────────────────────
   // The realtime socket above is the fast path, but phones suspend
@@ -2850,7 +2869,7 @@ export default function App() {
   // any events sent while it was down. So also re-pull bookings:
   //   - the moment the tab/app becomes visible again or the window regains focus,
   //   - when the device comes back online,
-  //   - every 60s while the tab is visible (cheap: one select).
+  //   - every 30s while the tab is visible (cheap: one select).
   // Any genuinely new rows found this way still alert via the effect below.
   useEffect(()=>{
     if(!currentUser) return;
@@ -2858,11 +2877,17 @@ export default function App() {
     document.addEventListener("visibilitychange",resync);
     window.addEventListener("focus",resync);
     window.addEventListener("online",resync);
-    const iv = setInterval(resync,60000);
+    // Chrome's Memory Saver / tab freezing: a frozen tab runs no JS at all,
+    // and fires these (not focus) when it wakes back up.
+    window.addEventListener("pageshow",resync);
+    document.addEventListener("resume",resync);
+    const iv = setInterval(resync,30000);
     return () => {
       document.removeEventListener("visibilitychange",resync);
       window.removeEventListener("focus",resync);
       window.removeEventListener("online",resync);
+      window.removeEventListener("pageshow",resync);
+      document.removeEventListener("resume",resync);
       clearInterval(iv);
     };
   },[currentUser?.id]);
