@@ -1059,6 +1059,21 @@ async function daily(c: Caller) {
 
 // ------------------------------------------------------------------ webhooks
 
+// EasyRepair's own Stripe account ID (differs between the sandbox and live).
+let platformAccountId: string | null = null;
+async function platformAccount() {
+  if (!platformAccountId) platformAccountId = (await stripe.accounts.retrieve()).id;
+  return platformAccountId;
+}
+// Link that opens this payment in EasyRepair's Stripe dashboard (it lives on
+// the engineer's connected account).
+async function dashboardUrl(pi: Stripe.PaymentIntent, account: string) {
+  try {
+    const platform = await platformAccount();
+    return `https://dashboard.stripe.com/${platform}/${pi.livemode ? "" : "test/"}connect/accounts/${account}/payments/${pi.id}`;
+  } catch (_) { return null; }
+}
+
 async function markJobPaid(pi: Stripe.PaymentIntent, account: string) {
   const bookingId = pi.metadata?.booking_id;
   if (!bookingId) return;
@@ -1092,6 +1107,7 @@ async function markJobPaid(pi: Stripe.PaymentIntent, account: string) {
     card_brand: card?.brand || null,
     card_last4: card?.last4 || null,
     stripe_livemode: !!pi.livemode,
+    stripe_dashboard_url: await dashboardUrl(pi, account),
     payment_status: "paid", paid_at: new Date((pi.created || Date.now() / 1000) * 1000).toISOString(),
     stripe_payment_intent_id: pi.id, stripe_charge_account_id: account, stripe_fee_pence: fee,
     total_pence: pi.amount,
