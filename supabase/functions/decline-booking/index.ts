@@ -21,6 +21,11 @@ import { createClient } from "npm:@supabase/supabase-js@2";
 
 const SUPABASE_URL = Deno.env.get("SUPABASE_URL");
 const SERVICE_ROLE_KEY = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY");
+const RESEND_API_KEY = Deno.env.get("RESEND_API_KEY");
+const NOTIFY_FROM_EMAIL = Deno.env.get("NOTIFY_FROM_EMAIL") || "bookings@easyrepair.co.uk";
+// Where "an SP declined a booking" alerts go. Comma-separate for several.
+const DECLINE_ALERT_EMAIL = Deno.env.get("DECLINE_ALERT_EMAIL") || "admin@easyrepair.co.uk";
+const ADMIN_URL = Deno.env.get("ADMIN_URL") || "https://admin.easyrepair.co.uk";
 
 // The Portal calls this from another domain, so the browser first sends an
 // OPTIONS "preflight" request; without these headers it blocks the real call
@@ -71,6 +76,70 @@ function pickReplacement(booking, engineers) {
   })[0];
 }
 
+function esc(v) {
+  return String(v ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+}
+
+function engineerName(eng) {
+  if (!eng) return null;
+  return eng.profile?.name || eng.business_name || eng.name || null;
+}
+
+// Emails the office that an SP declined a job. Never throws -- a failed
+// email must not undo or block the decline itself.
+async function sendDeclineAlert(booking, declinerName, reason, replacementName) {
+  if (!RESEND_API_KEY) return { skipped: "RESEND_API_KEY not set" };
+  const to = DECLINE_ALERT_EMAIL.split(",").map((s) => s.trim()).filter(Boolean);
+  if (!to.length) return { skipped: "no DECLINE_ALERT_EMAIL" };
+  const ref = booking.booking_ref || `#${booking.id}`;
+  const testTag = booking.is_test ? "[TEST] " : "";
+  const outcome = replacementName
+    ? `Automatically reassigned to ${replacementName}.`
+    : "No eligible SP was available - the booking is now UNASSIGNED and needs an SP.";
+  const when = booking.scheduled_date
+    ? `${booking.scheduled_date}${booking.scheduled_time ? " " + booking.scheduled_time : ""}`
+    : "Not scheduled";
+  const rows = [
+    ["Booking", ref],
+    ["Declined by", declinerName || "Unknown SP"],
+    ["Reason", reason || "None given"],
+    ["Outcome", outcome],
+    ["Customer", booking.customer],
+    ["Appliance", [booking.appliance, booking.brand].filter(Boolean).join(" - ")],
+    ["Issue", booking.issue],
+    ["Postcode", booking.postcode],
+    ["Scheduled", when],
+  ];
+  const text = `${testTag}An SP has declined booking ${ref}.\n\n` +
+    rows.map(([k, v]) => `${k}: ${v || "-"}`).join("\n") +
+    `\n\nOpen the admin panel: ${ADMIN_URL}`;
+  const html = `<div style="font-family: Arial, Helvetica, sans-serif; font-size: 15px; color: #111111; line-height: 1.5;">
+<p style="margin: 0 0 12px;">${esc(testTag)}An SP has <strong>declined</strong> booking <strong>${esc(ref)}</strong>.</p>
+<p style="margin: 0 0 16px; padding: 10px 12px; border-radius: 6px; background: ${replacementName ? "#eef7ee" : "#fdecea"}; color: ${replacementName ? "#1e5e1e" : "#a12622"}; font-weight: bold;">${esc(outcome)}</p>
+<table style="border-collapse: collapse; font-size: 14px;">
+${rows.map(([k, v]) => `<tr><td style="padding: 4px 16px 4px 0; color: #666666; vertical-align: top;">${esc(k)}</td><td style="padding: 4px 0;">${esc(v || "-")}</td></tr>`).join("\n")}
+</table>
+<p style="margin: 20px 0 0;"><a href="${esc(ADMIN_URL)}" style="color: #1a73e8; font-weight: bold; text-decoration: none;">Open the admin panel</a></p>
+</div>`;
+  try {
+    const res = await fetch("https://api.resend.com/emails", {
+      method: "POST",
+      headers: { Authorization: `Bearer ${RESEND_API_KEY}`, "Content-Type": "application/json" },
+      body: JSON.stringify({
+        from: NOTIFY_FROM_EMAIL,
+        to,
+        subject: `${testTag}SP declined ${ref}: ${booking.customer || ""} - ${booking.appliance || ""}${replacementName ? "" : " (now unassigned)"}`,
+        text,
+        html,
+      }),
+    });
+    if (!res.ok) return { error: await res.text() };
+    return { sent: true };
+  } catch (e) {
+    return { error: String(e) };
+  }
+}
+
 Deno.serve(async (req) => {
   if (req.method === "OPTIONS") return new Response("ok", { headers: corsHeaders });
   if (req.method !== "POST") return json({ error: "Method not allowed" }, 405);
@@ -102,6 +171,8 @@ Deno.serve(async (req) => {
     return json({ error: "Invalid JSON body" }, 400);
   }
   const { bookingId } = body || {};
+  // Optional free-text reason from the Portal (not sent yet, but recorded if it is).
+  const reason = typeof body?.reason === "string" ? body.reason.trim().slice(0, 500) || null : null;
   if (!bookingId) return json({ error: "bookingId is required" }, 400);
 
   const { data: booking, error: bookingErr } = await admin
@@ -128,7 +199,7 @@ Deno.serve(async (req) => {
 
   const declinedBy = Array.from(new Set([...(booking.declined_by || []), callerEngineer.id]));
 
-  const { data: engineerRows } = await admin.from("engineers").select("*");
+  const { data: engineerRows } = await admin.from("engineers").select("*, profile:profiles(name)");
   const { data: activeJobs } = await admin
     .from("bookings")
     .select("engineer_id,status")
@@ -147,6 +218,22 @@ Deno.serve(async (req) => {
 
   const { error: updateErr } = await admin.from("bookings").update(patch).eq("id", bookingId);
   if (updateErr) return json({ error: updateErr.message }, 500);
+
+  // Tell the office. Both steps are best-effort: the decline has already
+  // happened, so a logging/email failure is reported in the logs only.
+  const declinerName = engineerName((engineerRows || []).find((e) => e.id === callerEngineer.id));
+  const replacementName = replacement ? engineerName(replacement) || "another SP" : null;
+  const { error: logErr } = await admin.from("booking_declines").insert({
+    booking_id: bookingId,
+    engineer_id: callerEngineer.id,
+    engineer_name: declinerName,
+    reason,
+    reassigned_to: replacement?.id || null,
+    reassigned_to_name: replacementName,
+  });
+  if (logErr) console.error("booking_declines insert failed:", logErr.message);
+  const alert = await sendDeclineAlert(booking, declinerName, reason, replacementName);
+  if (!alert.sent) console.error("decline alert email not sent:", JSON.stringify(alert));
 
   return json({
     reassigned: !!replacement,
