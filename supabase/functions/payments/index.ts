@@ -644,7 +644,7 @@ async function chargeJob(c: Caller, body: any) {
   const rec = await recoveriesFor(eng.id, Math.max(0, m.engineerShare - estimateStripeFee(m.total)), b.id);
   const appFee = m.commission + rec.sum;
   const metadata = {
-    booking_id: b.id, kind: "job", fee_bearer: m.terms.fee_bearer,
+    booking_id: b.id, kind: "job", fee_bearer: m.terms.fee_bearer, paid_via: "saved_card",
     commission_pence: String(m.commission), engineer_share_pence: String(m.engineerShare),
     recovery_ids: rec.ids.join(","), recovery_pence: String(rec.sum),
   };
@@ -1084,7 +1084,14 @@ async function markJobPaid(pi: Stripe.PaymentIntent, account: string) {
   if (ids.length) {
     await db.from("commission_recoveries").update({ status: "recovered", recovered_on_booking_id: bookingId, updated_at: new Date().toISOString() }).in("id", ids).eq("status", "pending");
   }
+  // Payment record for FixFlow / the Portal: how it was paid and the card used.
+  const card: any = (charge as any).payment_method_details?.card || null;
+  const paidVia = pi.metadata?.paid_via === "saved_card" ? "saved_card" : "online";
   await updateBooking(bookingId, {
+    paid_via: paidVia,
+    card_brand: card?.brand || null,
+    card_last4: card?.last4 || null,
+    stripe_livemode: !!pi.livemode,
     payment_status: "paid", paid_at: new Date((pi.created || Date.now() / 1000) * 1000).toISOString(),
     stripe_payment_intent_id: pi.id, stripe_charge_account_id: account, stripe_fee_pence: fee,
     total_pence: pi.amount,
@@ -1240,7 +1247,7 @@ async function payPage(url: URL) {
       statement_descriptor_suffix: descriptorSuffix(b),
       description: `EasyRepair job ${ref(b)}`,
       metadata: {
-        booking_id: b.id, kind: "job", fee_bearer: m.terms.fee_bearer,
+        booking_id: b.id, kind: "job", fee_bearer: m.terms.fee_bearer, paid_via: "online",
         commission_pence: String(m.commission), engineer_share_pence: String(m.engineerShare),
         recovery_ids: rec.ids.join(","), recovery_pence: String(rec.sum),
       },
