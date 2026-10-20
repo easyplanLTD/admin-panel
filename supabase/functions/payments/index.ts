@@ -1083,7 +1083,12 @@ async function markJobPaid(pi: Stripe.PaymentIntent, account: string) {
   // Actual Stripe fee for this charge (paid from the engineer's account).
   const charge = await stripe.charges.retrieve(pi.latest_charge as string, { expand: ["balance_transaction"] }, { stripeAccount: account });
   const bt = charge.balance_transaction as Stripe.BalanceTransaction | null;
-  const fee = bt?.fee ?? estimateStripeFee(pi.amount);
+  // On a direct charge the engineer's balance transaction "fee" is Stripe's fee
+  // PLUS EasyRepair's application fee (commission). Only Stripe's own part
+  // (and any tax on it) is the card fee; never count the commission as a fee.
+  const fee = bt
+    ? (bt.fee_details || []).filter((d) => d.type === "stripe_fee" || d.type === "tax").reduce((t, d) => t + d.amount, 0)
+    : estimateStripeFee(pi.amount);
 
   // EasyRepair covers the fee unless this job's terms say the engineer does:
   // hand the fee back by refunding that much of the application fee.
