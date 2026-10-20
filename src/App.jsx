@@ -2531,6 +2531,66 @@ function engineerStatus(eng){
 }
 function userStatus(u){ return u.archived_at ? "archived" : "active"; }
 
+// ─── SP DECLINE ALERTS ───────────────────────────────────────────────────────
+// Unacknowledged rows from `booking_declines` (0020_booking_declines.sql),
+// written by the decline-booking Edge Function whenever an SP declines a job
+// in the Portal. Live via realtime; "Dismiss" stamps acknowledged_at so the
+// alert clears for every staff user.
+function useOpenDeclines(enabled){
+  const [rows,setRows] = useState([]);
+  useEffect(()=>{
+    if(!enabled) return;
+    let alive = true;
+    const load = async () => {
+      const { data, error } = await supabase.from("booking_declines").select("*").is("acknowledged_at",null).order("declined_at",{ascending:false});
+      if(alive && !error) setRows(data||[]);
+    };
+    load();
+    const ch = supabase.channel("booking-declines-open").on("postgres_changes",{event:"*",schema:"public",table:"booking_declines"},load).subscribe();
+    const t = setInterval(load, 60000); // safety net if realtime drops
+    return () => { alive=false; clearInterval(t); supabase.removeChannel(ch); };
+  },[enabled]);
+  const acknowledge = async (ids) => {
+    if(!ids.length) return;
+    const { data:{ user } } = await supabase.auth.getUser();
+    setRows(r=>r.filter(x=>!ids.includes(x.id)));
+    await supabase.from("booking_declines").update({acknowledged_at:new Date().toISOString(),acknowledged_by:user?.id||null}).in("id",ids);
+  };
+  return [rows,acknowledge];
+}
+
+function DeclineAlerts({declines,jobs,onOpenJob,onDismiss}){
+  if(!declines.length) return null;
+  return (
+    <div style={{background:C.card,borderRadius:12,overflow:"hidden",marginBottom:14,border:`1px solid ${C.danger}`,boxShadow:"0 0 14px rgba(248,113,113,0.15)"}}>
+      <div style={{padding:"11px 17px",borderBottom:`1px solid ${C.border}`,display:"flex",alignItems:"center",gap:10}}>
+        <span style={{fontWeight:800,color:C.danger,fontSize:13}}>Declined by SP</span>
+        <span style={{background:C.danger,color:"#000",borderRadius:10,fontSize:10,fontWeight:900,padding:"1px 7px"}}>{declines.length}</span>
+        <div style={{marginLeft:"auto"}}>{declines.length>1&&<Btn sm variant="ghost" onClick={()=>onDismiss(declines.map(d=>d.id))}>Dismiss all</Btn>}</div>
+      </div>
+      {declines.map(d=>{
+        const job = jobs.find(j=>j.id===d.booking_id);
+        return (
+          <div key={d.id} onClick={()=>job&&onOpenJob(job)} style={{padding:"10px 17px",borderBottom:`1px solid #262626`,cursor:job?"pointer":"default",display:"flex",alignItems:"center",gap:12,flexWrap:"wrap"}} onMouseOver={e=>e.currentTarget.style.background="#1E2530"} onMouseOut={e=>e.currentTarget.style.background="transparent"}>
+            <div style={{flex:1,minWidth:200}}>
+              <div style={{fontWeight:700,fontSize:13}}>
+                <span style={{color:C.primary}}>{job?.bookingRef||"Booking"}</span>{job&&<> · {job.customer} <span style={{color:C.light,fontWeight:400}}>· {job.appliance} · {job.brand||"?"}</span></>}
+              </div>
+              <div style={{color:C.mid,fontSize:11,marginTop:2}}>
+                Declined by <strong style={{color:C.text}}>{d.engineer_name||"an SP"}</strong> · {fmtDateTime(d.declined_at)}{d.reason?<> · “{d.reason}”</>:null}
+              </div>
+            </div>
+            <span style={{fontSize:11,fontWeight:800,padding:"2px 9px",borderRadius:20,background:d.reassigned_to?C.warnLight:C.dangerLight,color:d.reassigned_to?C.warn:C.danger,whiteSpace:"nowrap"}}>
+              {d.reassigned_to?`Reassigned → ${d.reassigned_to_name||"another SP"}`:"Now unassigned"}
+            </span>
+            <Btn sm variant="ghost" onClick={e=>{e.stopPropagation();onDismiss([d.id]);}}>Dismiss</Btn>
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
 export default function App() {
   const [currentUser,setCU]       = useState(null);
   const [authChecked,setAuthChecked] = useState(false);
@@ -2610,6 +2670,7 @@ export default function App() {
 
   const isOwner = currentUser?.role==="owner";
   const openFlags = useOpenFlagsCount();
+  const [openDeclines,ackDeclines] = useOpenDeclines(!!currentUser);
   const accent  = {owner:C.purple,staff:C.primary}[currentUser?.role]||C.primary;
 
   // A failed load here used to just silently leave whatever was already in
@@ -3219,7 +3280,7 @@ export default function App() {
   // pill in SectionTabs (Bookings > Payments) now, so a dedicated top-level
   // entry would just be a redundant second way to get there. The "payments"
   // view itself is untouched; only this nav listing changed.
-  const NAV = [{id:"dashboard",label:"Dashboard",Ic:IconLayout},{id:"jobs",label:"Bookings",Ic:IconMenuLines},{id:"serviceplans",label:"Protection Plans",Ic:IconShield},{id:"engineers",label:"SP's",Ic:IconList},{id:"disputes",label:"Disputes",Ic:IconFlag,badge:openFlags},...(isOwner?[{id:"settings",label:"Settings",Ic:IconGear}]:[])];
+  const NAV = [{id:"dashboard",label:"Dashboard",Ic:IconLayout,badge:openDeclines.length},{id:"jobs",label:"Bookings",Ic:IconMenuLines},{id:"serviceplans",label:"Protection Plans",Ic:IconShield},{id:"engineers",label:"SP's",Ic:IconList},{id:"disputes",label:"Disputes",Ic:IconFlag,badge:openFlags},...(isOwner?[{id:"settings",label:"Settings",Ic:IconGear}]:[])];
 
   // Clears the forced-password-change flag once they've set their own —
   // covers both provisioning paths (they typed the temp password directly,
@@ -3358,6 +3419,7 @@ export default function App() {
                 <StatCard label="Open Quotes" value={quoteJobs.length} color={C.purple} onClick={()=>{setQSearch("");setView("quotes");}} title="Go to Quotes"/>
                 {isOwner&&<StatCard label="Outstanding Pay" value={`£${unpaidAmt}`} color={C.danger} sub={`${unpaidDone.length} unpaid`} onClick={()=>setView("payments")} title="Go to Payments"/>}
               </div>
+              <DeclineAlerts declines={openDeclines} jobs={jobs} onOpenJob={setSelJob} onDismiss={ackDeclines}/>
               <div style={{background:C.card,borderRadius:12,boxShadow:"0 1px 3px rgba(0,0,0,.05)",overflow:"hidden",marginBottom:14}}>
                 <div style={{padding:"11px 17px",borderBottom:`1px solid ${C.border}`,fontWeight:800,color:C.text,fontSize:13}}>Today's Schedule</div>
                 {todayJobs.length===0?<div style={{padding:22,textAlign:"center",color:C.light,fontSize:13}}>No jobs scheduled today</div>:todayJobs.map(j=>{
