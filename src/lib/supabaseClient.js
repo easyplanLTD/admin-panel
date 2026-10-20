@@ -29,4 +29,9 @@ const supabaseAnonKey = import.meta.env.VITE_SUPABASE_ANON_KEY;
 // before anything else gets a chance to touch it.
 export const supabase = createClient(supabaseUrl, supabaseAnonKey, {
   auth: { detectSessionInUrl: false },
+  // Live updates: run the realtime heartbeat in a Web Worker so it keeps
+  // ticking when the tab is in the background (Chrome throttles normal page
+  // timers there, the heartbeat stalls, and the server drops the socket --
+  // which is what made bookings stop appearing until a manual refresh).
+  realtime: { worker: true, heartbeatIntervalMs: 15000 },
 });
