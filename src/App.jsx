@@ -217,6 +217,9 @@ const ROLE_C = {
 
 const inp = {width:"100%",padding:"8px 11px",border:"1.5px solid #262626",borderRadius:7,fontSize:13,color:"#F1F5F9",background:"#000000",boxSizing:"border-box",fontFamily:"inherit",outline:"none"};
 const ta  = {...inp,resize:"vertical",minHeight:68};
+// AM / PM visit slots and what they mean (older bookings may hold HH:MM).
+const SLOT_LABELS = { AM: "AM (8am–12pm)", PM: "PM (12pm–6:30pm)" };
+const slotLabel = t => (t && SLOT_LABELS[t]) || t || "";
 const fmt = d => d ? new Date(d+"T12:00:00").toLocaleDateString("en-GB",{day:"numeric",month:"short",year:"numeric"}) : "—";
 // For real timestamptz values (e.g. job.createdAt) -- these already carry a real
 // time + timezone from Postgres, unlike the plain YYYY-MM-DD strings `fmt` above
@@ -654,7 +657,7 @@ function JobForm({initial,onSave,onCancel,canEditRate,engineers,jobs,externalSps
       <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:10}}>
         <Fl label="Scheduled Date"><input type="date" style={inp} value={f.scheduledDate} onChange={e=>set("scheduledDate",e.target.value)}/></Fl>
         <Fl label="AM or PM"><select style={inp} value={f.scheduledTime||""} onChange={e=>set("scheduledTime",e.target.value)}>
-          <option value="">Select…</option><option value="AM">AM (morning)</option><option value="PM">PM (afternoon)</option>
+          <option value="">Select…</option><option value="AM">{SLOT_LABELS.AM}</option><option value="PM">{SLOT_LABELS.PM}</option>
           {f.scheduledTime&&!["AM","PM"].includes(f.scheduledTime)&&<option value={f.scheduledTime}>{f.scheduledTime}</option>}
         </select></Fl>
       </div>
@@ -816,8 +819,8 @@ function JobDetail({job,onClose,onEdit,onReassign,onDelete,engineers,isOwner,onP
         </div>
         <div style={{background:"#1E2530",borderRadius:9,padding:12}}>
           <div style={{fontSize:10,color:C.light,fontWeight:700,textTransform:"uppercase",marginBottom:5}}>Scheduled</div>
-          <div style={{fontWeight:700}}>{fmt(job.scheduledDate)}{job.scheduledTime?` · ${job.scheduledTime}`:""}</div>
-          {job.returnVisitDate&&<div style={{color:C.primary,fontSize:12,fontWeight:700,marginTop:4}}>↻ Return visit: {fmt(job.returnVisitDate)}{job.returnVisitTime?` · ${job.returnVisitTime}`:""}</div>}
+          <div style={{fontWeight:700}}>{fmt(job.scheduledDate)}{job.scheduledTime?` · ${slotLabel(job.scheduledTime)}`:""}</div>
+          {job.returnVisitDate&&<div style={{color:C.primary,fontSize:12,fontWeight:700,marginTop:4}}>↻ Return visit: {fmt(job.returnVisitDate)}{job.returnVisitTime?` · ${slotLabel(job.returnVisitTime)}`:""}</div>}
           {job.completedDate&&<div style={{color:C.success,fontSize:12,fontWeight:600,marginTop:4}}>✓ Completed {fmt(job.completedDate)}</div>}
         </div>
         <div style={{background:"#1E2530",borderRadius:9,padding:12}}>
@@ -3428,7 +3431,7 @@ export default function App() {
                 {todayJobs.length===0?<div style={{padding:22,textAlign:"center",color:C.light,fontSize:13}}>No jobs scheduled today</div>:todayJobs.map(j=>{
                   const eng=engineers.find(e=>e.id===j.engineerId);
                   return <div key={j.id} onClick={()=>setSelJob(j)} style={{padding:"10px 17px",borderBottom:`1px solid #262626`,cursor:"pointer",display:"flex",alignItems:"center",gap:12}} onMouseOver={e=>e.currentTarget.style.background="#1E2530"} onMouseOut={e=>e.currentTarget.style.background="transparent"}>
-                    <div style={{fontWeight:800,color:C.primary,fontSize:12,minWidth:42}}>{j.scheduledTime}</div>
+                    <div style={{fontWeight:800,color:C.primary,fontSize:12,minWidth:42}}>{slotLabel(j.scheduledTime)}</div>
                     <div style={{flex:1}}>
                       <div style={{fontWeight:700,fontSize:13}}>{j.customer} <span style={{color:C.light,fontWeight:400}}>· {j.appliance} · {j.brand||"?"}{j.applianceAgeLabel?` · ${j.applianceAgeLabel}`:(j.applianceAge===""||j.applianceAge==null)?"":` · ${j.applianceAge}yr`}</span></div>
                       <div style={{color:C.mid,fontSize:11}}>{j.address}</div>
@@ -3534,7 +3537,7 @@ export default function App() {
                         <td style={{padding:"9px 13px",fontSize:12}}>{j.appliance}</td>
                         <td style={{padding:"9px 13px",fontSize:12,fontWeight:600}}>{j.brand||<span style={{color:C.light}}>—</span>}</td>
                         <td style={{padding:"9px 13px",fontSize:12}}>{j.applianceAgeLabel?j.applianceAgeLabel:(j.applianceAge===""||j.applianceAge==null)?<span style={{color:C.light}}>—</span>:`${j.applianceAge}yr`}</td>
-                        <td style={{padding:"9px 13px",fontSize:11}}>{fmt(j.scheduledDate)}<br/><span style={{color:C.light}}>{j.scheduledTime}</span></td>
+                        <td style={{padding:"9px 13px",fontSize:11}}>{fmt(j.scheduledDate)}<br/><span style={{color:C.light}}>{slotLabel(j.scheduledTime)}</span></td>
                         <td style={{padding:"9px 13px",fontSize:12,color:j.isExternal?C.purple:eng?C.text:C.danger,fontWeight:j.isExternal||!eng?700:400}}>{j.isExternal?`${j.externalName} (External)`:eng?.name||"Unassigned"}</td>
                         <td style={{padding:"9px 13px"}}><Badge status={j.status}/></td>
                         <td style={{padding:"9px 13px",fontSize:12,fontWeight:800,color:C.text}} title={calloutPackageLabel(j)}>{fmtGBP(calloutFeeFor(j))}<div style={{color:C.light,fontSize:10,fontWeight:600}}>{calloutPackageLabel(j)}</div></td>
