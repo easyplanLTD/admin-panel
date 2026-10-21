@@ -391,7 +391,7 @@ async function notifyCustomerOfEngineer(b, eng) {
 // claimed before sending (same pattern as notified_engineer_id) so a double
 // save or a webhook retry never sends twice. Our own claim update fires the
 // webhook again, but the date/slot is unchanged then, so it's a no-op.
-const VISIT_SLOT_LABELS = { AM: "AM (morning)", PM: "PM (afternoon)", "All day": "All day" };
+const VISIT_SLOT_LABELS = { AM: "AM (8am-12pm)", PM: "PM (12pm-6:30pm)", "All day": "All day" };
 const SUPPORT_EMAIL = "support@easyrepair.co.uk";
 
 function visitKey(date, time) {
