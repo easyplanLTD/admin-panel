@@ -383,6 +383,128 @@ async function notifyCustomerOfEngineer(b, eng) {
   return result;
 }
 
+// ─── visit booked by the SP → CUSTOMER ─────────────────────────────────────
+// When the SP sets (or changes) the visit date + AM/PM in the Portal, the
+// customer gets an SMS + email with the date and slot. Same for a return
+// visit. Detected by comparing the webhook's old_record with record (UPDATEs
+// only), and de-duplicated with notified_schedule / notified_return_visit,
+// claimed before sending (same pattern as notified_engineer_id) so a double
+// save or a webhook retry never sends twice. Our own claim update fires the
+// webhook again, but the date/slot is unchanged then, so it's a no-op.
+const VISIT_SLOT_LABELS = { AM: "AM (morning)", PM: "PM (afternoon)", "All day": "All day" };
+const SUPPORT_EMAIL = "support@easyrepair.co.uk";
+
+function visitKey(date, time) {
+  return date ? `${date} ${time || ""}`.trim() : null;
+}
+function fmtVisitDate(date) {
+  return new Date(`${date}T12:00:00Z`).toLocaleDateString("en-GB", {
+    weekday: "long", day: "numeric", month: "long", year: "numeric", timeZone: "Europe/London",
+  });
+}
+function fmtVisitSlot(time) {
+  if (!time) return null;
+  return VISIT_SLOT_LABELS[time] || String(time).slice(0, 5);
+}
+
+async function twilioSend(rawPhone, body) {
+  const to = toE164UK(rawPhone);
+  if (!to) return { skipped: "no customer phone on this booking" };
+  if (!TWILIO_ACCOUNT_SID || !TWILIO_AUTH_TOKEN || !TWILIO_FROM_NUMBER) return { skipped: "Twilio secrets not set" };
+  try {
+    const res = await fetch(
+      `https://api.twilio.com/2010-04-01/Accounts/${TWILIO_ACCOUNT_SID}/Messages.json`,
+      {
+        method: "POST",
+        headers: {
+          Authorization: "Basic " + btoa(`${TWILIO_ACCOUNT_SID}:${TWILIO_AUTH_TOKEN}`),
+          "Content-Type": "application/x-www-form-urlencoded",
+        },
+        body: new URLSearchParams({ To: to, From: TWILIO_FROM_NUMBER, Body: body }),
+      }
+    );
+    return res.ok ? { sent: true } : { error: await res.text() };
+  } catch (e) {
+    return { error: String(e) };
+  }
+}
+
+async function resendSend(to, subject, text, html) {
+  if (!to) return { skipped: "no customer email on this booking" };
+  if (!RESEND_API_KEY) return { skipped: "RESEND_API_KEY not set" };
+  try {
+    const res = await fetch("https://api.resend.com/emails", {
+      method: "POST",
+      headers: { Authorization: "Bearer " + RESEND_API_KEY, "Content-Type": "application/json" },
+      body: JSON.stringify({ from: NOTIFY_FROM_EMAIL, to, subject, text, html }),
+    });
+    return res.ok ? { sent: true } : { error: await res.text() };
+  } catch (e) {
+    return { error: String(e) };
+  }
+}
+
+async function notifyCustomerOfVisit(admin, record, oldRecord, kind) {
+  const isReturn = kind === "return";
+  const dateCol = isReturn ? "return_visit_date" : "scheduled_date";
+  const timeCol = isReturn ? "return_visit_time" : "scheduled_time";
+  const flagCol = isReturn ? "notified_return_visit" : "notified_schedule";
+
+  const key = visitKey(record[dateCol], record[timeCol]);
+  if (!key) return { skipped: "no date set" };
+  if (record.status === "Cancelled") return { skipped: "booking cancelled" };
+  const oldKey = oldRecord ? visitKey(oldRecord[dateCol], oldRecord[timeCol]) : null;
+  if (key === oldKey) return { skipped: "date/slot unchanged" };
+  if (record[flagCol] === key) return { skipped: "already notified" };
+
+  const { data: claimed, error: claimErr } = await admin
+    .from("bookings")
+    .update({ [flagCol]: key })
+    .eq("id", record.id)
+    .or(`${flagCol}.is.null,${flagCol}.neq."${key}"`)
+    .select("id");
+  if (claimErr) return { error: "Could not claim visit notification: " + claimErr.message };
+  if (!claimed || claimed.length === 0) return { skipped: "already notified (parallel call)" };
+
+  const changed = !!oldKey;
+  const what = isReturn ? "return visit" : "repair visit";
+  const headline = changed ? `Your ${what} has been changed` : `Your ${what} is booked`;
+  const dateLabel = fmtVisitDate(record[dateCol]);
+  const slotLabel = fmtVisitSlot(record[timeCol]);
+  const ref = record.booking_ref || ("#" + record.id);
+  const eng = await lookupEngineerContact(record.engineer_id);
+  const engLine = eng ? `${eng.name || "Easy Repair engineer"}${eng.phone ? " (" + eng.phone + ")" : ""}` : null;
+  const changeLine = eng && eng.phone
+    ? "If this doesn't suit you, please call your engineer on the number above."
+    : `If this doesn't suit you, please email ${SUPPORT_EMAIL}.`;
+
+  const lines = [
+    `Date: ${dateLabel}`,
+    ...(slotLabel ? [`Time: ${slotLabel}`] : []),
+    ...(engLine ? [`Engineer: ${engLine}`] : []),
+    `Booking reference: ${ref}`,
+  ];
+
+  const smsBody = [`Easy Repair: ${headline.charAt(0).toLowerCase() + headline.slice(1)}.`, "", ...lines, "", changeLine].join("\n");
+  const sms = await twilioSend(record.phone, smsBody);
+
+  const text = [`Hi ${record.customer || "there"},`, "", `${headline}.`, "", ...lines, "", changeLine, "", "Thanks, Easy Repair"].join("\n");
+  const html = `<div style="font-family: Arial, sans-serif; font-size: 15px; color: #111; line-height: 1.5; max-width: 480px;">
+  <img src="${LOGO_URL}" alt="EasyRepair" width="200" height="44" style="display:block;border:0;width:200px;height:44px;margin-bottom:16px;" />
+  <p>Hi ${escapeHtml(record.customer || "there")},</p>
+  <p><strong>${escapeHtml(headline)}.</strong></p>
+  <p style="margin: 0 0 4px;">Date: <strong>${escapeHtml(dateLabel)}</strong></p>
+  ${slotLabel ? `<p style="margin: 0 0 4px;">Time: <strong>${escapeHtml(slotLabel)}</strong></p>` : ""}
+  ${engLine ? `<p style="margin: 0 0 4px;">Engineer: <strong>${escapeHtml(eng.name || "Easy Repair engineer")}</strong>${eng.phone ? ` (<a href="tel:${escapeHtml(eng.phone)}">${escapeHtml(eng.phone)}</a>)` : ""}</p>` : ""}
+  <p style="margin: 0 0 16px;">Booking reference: <strong>${escapeHtml(ref)}</strong></p>
+  <p>${escapeHtml(changeLine)}</p>
+  <p>Thanks,<br/>Easy Repair</p>
+</div>`;
+  const email = await resendSend(record.email, `${headline} - ${dateLabel}${slotLabel ? ", " + slotLabel : ""} (${ref})`, text, html);
+
+  return { key, changed, sms, email };
+}
+
 Deno.serve(async (req) => {
   if (req.method !== "POST") return json({ error: "Method not allowed" }, 405);
 
@@ -419,6 +541,19 @@ Deno.serve(async (req) => {
     : { skipped: "not an insert" };
 
 
+  // Visit date + AM/PM booked or changed (Portal / FixFlow) -> tell the customer.
+  let visitNotices = { skipped: "not an update" };
+  if (payload?.type === "UPDATE") {
+    const visitAdmin = createClient(SUPABASE_URL, SERVICE_ROLE_KEY, {
+      auth: { autoRefreshToken: false, persistSession: false },
+    });
+    const oldRecord = payload?.old_record || null;
+    visitNotices = {
+      visit: await notifyCustomerOfVisit(visitAdmin, record, oldRecord, "first"),
+      returnVisit: await notifyCustomerOfVisit(visitAdmin, record, oldRecord, "return"),
+    };
+  }
+
   const engineerId = record.engineer_id;
   const previouslyNotifiedFor = record.notified_engineer_id;
 
@@ -429,7 +564,7 @@ Deno.serve(async (req) => {
   // change to the row, so the webhook fires again; this check makes that
   // second call a fast, free no-op instead of a second text/email).
   if (!engineerId || engineerId === previouslyNotifiedFor) {
-    return json({ skipped: true, reason: !engineerId ? "unassigned" : "already notified", customerSms });
+    return json({ skipped: true, reason: !engineerId ? "unassigned" : "already notified", customerSms, visitNotices });
   }
 
   const admin = createClient(SUPABASE_URL, SERVICE_ROLE_KEY, {
@@ -448,7 +583,7 @@ Deno.serve(async (req) => {
     .select("id");
   if (claimErr) return json({ error: "Could not claim notification", detail: claimErr.message }, 500);
   if (!claimed || claimed.length === 0) {
-    return json({ skipped: true, reason: "already notified (parallel call)", customerSms });
+    return json({ skipped: true, reason: "already notified (parallel call)", customerSms, visitNotices });
   }
 
   const { data: engRow, error: engErr } = await admin
@@ -478,5 +613,5 @@ Deno.serve(async (req) => {
   // notify-assignment -> Logs) for you to follow up on.
   // (notified_engineer_id was already set by the claim above.)
 
-  return json({ engineerId, email: emailResult, sms: smsResult, customerSms, customerEngineer });
+  return json({ engineerId, email: emailResult, sms: smsResult, customerSms, customerEngineer, visitNotices });
 });
