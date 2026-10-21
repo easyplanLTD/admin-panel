@@ -115,7 +115,7 @@ async function sendAdminNewBookingEmail(b) {
     row('Appliance', esc(b.appliance) + (b.brand ? ' (' + esc(b.brand) + ')' : '')),
     row('Appliance age', esc(b.applianceAge)),
     row('Issue', esc(b.problem || 'Not specified')),
-    row('Preferred call time', esc(b.preferredCallTime)),
+    row('Preferred visit date and time', esc(b.preferredCallTime)),
     row('Package', b.protectionPlan ? 'Repair + Protection Plan' : 'Repair only'),
     row('Engineer', b.engineerName
       ? esc(b.engineerName) + (b.engineerPhone ? ' - ' + esc(b.engineerPhone) : '') + ' (auto-assigned)'
