@@ -237,7 +237,7 @@ function buildCustomerReceivedMessage(b, eng) {
     `Phone: ${b.phone || "Not specified"}`,
     `Email: ${b.email || "Not specified"}`,
     `Address: ${address}`,
-    `Best time to call: ${b.preferred_call_time || "Not specified"}`,
+    `Preferred visit date and time: ${b.preferred_call_time || "Not specified"}`,
     `Callout fee: ${b.wants_protection_plan ? CALLOUT_FEE_LABEL_PROTECTION_PLAN : CALLOUT_FEE_LABEL_REPAIR_ONLY}`,
     "",
     "What happens next? We'll call or text you on the number provided - usually within a few hours during business hours (Mon-Sat, 8am-7pm). Your appointment date will be confirmed then.",
