@@ -841,6 +841,16 @@ function JobDetail({job,onClose,onEdit,onReassign,onDelete,engineers,isOwner,onP
         <div style={{fontSize:13}}>{job.issue}</div>
       </div>
 
+      <div style={{background:"#1E2530",borderRadius:9,padding:12,marginBottom:12,border:`1px solid ${job.outcomeReport?"rgba(212,255,60,0.35)":C.border}`}}>
+        <div style={{display:"flex",justifyContent:"space-between",gap:8,flexWrap:"wrap",marginBottom:4}}>
+          <div style={{fontSize:10,color:job.outcomeReport?"#d4ff3c":C.light,fontWeight:700,textTransform:"uppercase"}}>Outcome Report{job.status==="Beyond Repair"?" · BER":job.status==="Completed"?" · Repaired":""}</div>
+          {job.outcomeReportAt&&<div style={{fontSize:11,color:C.light}}>{fmtDateTime(job.outcomeReportAt)}</div>}
+        </div>
+        {job.outcomeReport
+          ? <div style={{fontSize:13,color:C.text,whiteSpace:"pre-wrap"}}>{job.outcomeReport}</div>
+          : <div style={{fontSize:13,color:C.light,fontStyle:"italic"}}>No report yet. The SP writes this when they take payment.</div>}
+      </div>
+
       <div style={{background:"#1E2530",borderRadius:9,padding:12,marginBottom:12}}>
         <div style={{fontSize:10,color:C.light,fontWeight:700,textTransform:"uppercase",marginBottom:8}}>Customer Notifications</div>
         {[["📩","Booking Confirmation",job.notifBooking],["🔔","Day-Before Reminder",job.notifReminder],["🚗","SP On the Way",job.notifOnWay],["✅","Job Completed",job.notifComplete]].map(([ic,lb,sent])=>(
@@ -1794,6 +1804,10 @@ function mapBookingRow(row){
     // be finished first time (see 0009_return_visit.sql). Read-only here.
     returnVisitDate: row.return_visit_date||"", returnVisitTime: row.return_visit_time?(/^\d/.test(String(row.return_visit_time))?String(row.return_visit_time).slice(0,5):String(row.return_visit_time)):"",
     rate: row.rate, paid: row.paid, notes: row.notes||"",
+    // SP's write-up of the job from the Portal's Take payment screen, sent to the
+    // customer in the job-completed message (20261021_outcome_report.sql). Read-only here.
+    outcomeReport: row.outcome_report||"", outcomeReportAt: row.outcome_report_at||null,
+    notifComplete: !!row.notified_complete,
     // Customer has paid (recorded by the engineer in the Portal, or by the office) -- 0008_payment_taken.sql.
     paymentTaken: !!row.payment_taken, paymentTakenAt: row.payment_taken_at||null,
     // One-off engineer from outside Easy Repair's normal roster, used when a
