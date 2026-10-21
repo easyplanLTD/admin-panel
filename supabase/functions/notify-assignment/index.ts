@@ -505,6 +505,73 @@ async function notifyCustomerOfVisit(admin, record, oldRecord, kind) {
   return { key, changed, sms, email };
 }
 
+// Job completed (Repaired) or Beyond Repair -> tell the customer, including
+// the SP's outcome report written in the Portal's Take payment screen
+// (bookings.outcome_report, 20261021_outcome_report.sql). Sent once per
+// booking: bookings.notified_complete is claimed before sending, so webhook
+// retries and the extra webhook our own claim update fires are no-ops.
+const OUTCOME_STATUSES = ["Completed", "Beyond Repair"];
+const SMS_REPORT_MAX = 600;
+
+async function notifyCustomerOfCompletion(admin, record, oldRecord) {
+  if (!OUTCOME_STATUSES.includes(record.status)) return { skipped: "not completed" };
+  if (oldRecord && oldRecord.status === record.status) return { skipped: "status unchanged" };
+  if (record.notified_complete) return { skipped: "already notified" };
+
+  const { data: claimed, error: claimErr } = await admin
+    .from("bookings")
+    .update({ notified_complete: new Date().toISOString() })
+    .eq("id", record.id)
+    .is("notified_complete", null)
+    .select("id, outcome_report");
+  if (claimErr) return { error: "Could not claim completion notification: " + claimErr.message };
+  if (!claimed || claimed.length === 0) return { skipped: "already notified (parallel call)" };
+
+  const ber = record.status === "Beyond Repair";
+  // Re-read from the claim in case the report landed in a separate save.
+  const report = String(claimed[0].outcome_report || record.outcome_report || "").trim();
+  const appliance = String(record.appliance || "appliance").toLowerCase();
+  const ref = record.booking_ref || ("#" + record.id);
+  const eng = await lookupEngineerContact(record.engineer_id);
+  const engName = eng?.name || null;
+
+  const headline = ber
+    ? `Your ${appliance} has been assessed and is beyond economical repair`
+    : `Your ${appliance} repair is complete`;
+  const intro = ber
+    ? `${engName ? engName : "Your engineer"} has assessed your ${appliance} and found it isn't economical to repair.`
+    : `${engName ? engName : "Your engineer"} has completed the repair on your ${appliance}.`;
+  const outro = `If you have any questions about the work, please email ${SUPPORT_EMAIL} quoting ${ref}.`;
+
+  const smsReport = report.length > SMS_REPORT_MAX ? report.slice(0, SMS_REPORT_MAX - 1).trimEnd() + "…" : report;
+  const smsBody = [
+    `Easy Repair: ${headline.charAt(0).toLowerCase() + headline.slice(1)}.`,
+    ...(smsReport ? ["", "Engineer's report:", smsReport] : []),
+    "", `Booking reference: ${ref}`,
+    "", "Thank you for choosing Easy Repair.",
+  ].join("\n");
+  const sms = await twilioSend(record.phone, smsBody);
+
+  const text = [
+    `Hi ${record.customer || "there"},`, "", intro,
+    ...(report ? ["", "Engineer's report:", report] : []),
+    "", `Booking reference: ${ref}`, "", outro, "", "Thank you for choosing Easy Repair.",
+  ].join("\n");
+  const html = `<div style="font-family: Arial, sans-serif; font-size: 15px; color: #111; line-height: 1.5; max-width: 480px;">
+  <img src="${LOGO_URL}" alt="EasyRepair" width="200" height="44" style="display:block;border:0;width:200px;height:44px;margin-bottom:16px;" />
+  <p>Hi ${escapeHtml(record.customer || "there")},</p>
+  <p><strong>${escapeHtml(headline)}.</strong></p>
+  <p>${escapeHtml(intro)}</p>
+  ${report ? `<div style="background:#f4f4f2;border-left:4px solid #d4ff3c;padding:12px 14px;margin:0 0 16px;"><p style="margin:0 0 6px;font-weight:bold;">Engineer's report</p><p style="margin:0;white-space:pre-wrap;">${escapeHtml(report)}</p></div>` : ""}
+  <p style="margin: 0 0 16px;">Booking reference: <strong>${escapeHtml(ref)}</strong></p>
+  <p>${escapeHtml(outro)}</p>
+  <p>Thank you for choosing Easy Repair.</p>
+</div>`;
+  const email = await resendSend(record.email, `${headline} (${ref})`, text, html);
+
+  return { ber, hasReport: !!report, sms, email };
+}
+
 Deno.serve(async (req) => {
   if (req.method !== "POST") return json({ error: "Method not allowed" }, 405);
 
@@ -551,6 +618,7 @@ Deno.serve(async (req) => {
     visitNotices = {
       visit: await notifyCustomerOfVisit(visitAdmin, record, oldRecord, "first"),
       returnVisit: await notifyCustomerOfVisit(visitAdmin, record, oldRecord, "return"),
+      completed: await notifyCustomerOfCompletion(visitAdmin, record, oldRecord),
     };
   }
 
