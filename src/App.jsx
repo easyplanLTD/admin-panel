@@ -793,7 +793,7 @@ function JobDetail({job,onClose,onEdit,onReassign,onDelete,engineers,isOwner,onP
           <div style={{fontWeight:700,fontSize:14}}>{job.customer}</div>
           <div style={{color:C.mid,fontSize:12,marginTop:2}}><CallLink phone={job.phone}/></div>
           <div style={{color:C.mid,fontSize:12}}>✉ {job.email}</div>
-          {job.preferredCallTime&&<div style={{color:C.mid,fontSize:12,marginTop:2}}>🕐 Prefers: {job.preferredCallTime}</div>}
+          {job.preferredCallTime&&<div style={{color:C.mid,fontSize:12,marginTop:2}}>🕐 Preferred visit date and time: {job.preferredCallTime}</div>}
         </div>
         <div style={{background:"#1E2530",borderRadius:9,padding:12}}>
           <div style={{fontSize:10,color:C.light,fontWeight:700,textTransform:"uppercase",marginBottom:5}}>SP</div>
