@@ -653,7 +653,10 @@ function JobForm({initial,onSave,onCancel,canEditRate,engineers,jobs,externalSps
       <Fl label="Fault Description"><textarea style={ta} value={f.issue} onChange={e=>set("issue",e.target.value)} placeholder="Describe the fault in detail..."/></Fl>
       <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:10}}>
         <Fl label="Scheduled Date"><input type="date" style={inp} value={f.scheduledDate} onChange={e=>set("scheduledDate",e.target.value)}/></Fl>
-        <Fl label="Scheduled Time"><input type="time" style={inp} value={f.scheduledTime} onChange={e=>set("scheduledTime",e.target.value)}/></Fl>
+        <Fl label="AM or PM"><select style={inp} value={f.scheduledTime||""} onChange={e=>set("scheduledTime",e.target.value)}>
+          <option value="">Select…</option><option value="AM">AM (morning)</option><option value="PM">PM (afternoon)</option>
+          {f.scheduledTime&&!["AM","PM"].includes(f.scheduledTime)&&<option value={f.scheduledTime}>{f.scheduledTime}</option>}
+        </select></Fl>
       </div>
 
       <div style={{background:C.primaryLight,border:`1px solid #BFDBFE`,borderRadius:9,padding:"12px 14px",marginBottom:12}}>
@@ -813,8 +816,8 @@ function JobDetail({job,onClose,onEdit,onReassign,onDelete,engineers,isOwner,onP
         </div>
         <div style={{background:"#1E2530",borderRadius:9,padding:12}}>
           <div style={{fontSize:10,color:C.light,fontWeight:700,textTransform:"uppercase",marginBottom:5}}>Scheduled</div>
-          <div style={{fontWeight:700}}>{fmt(job.scheduledDate)} at {job.scheduledTime}</div>
-          {job.returnVisitDate&&<div style={{color:C.primary,fontSize:12,fontWeight:700,marginTop:4}}>↻ Return visit: {fmt(job.returnVisitDate)}{job.returnVisitTime?` at ${job.returnVisitTime}`:""}</div>}
+          <div style={{fontWeight:700}}>{fmt(job.scheduledDate)}{job.scheduledTime?` · ${job.scheduledTime}`:""}</div>
+          {job.returnVisitDate&&<div style={{color:C.primary,fontSize:12,fontWeight:700,marginTop:4}}>↻ Return visit: {fmt(job.returnVisitDate)}{job.returnVisitTime?` · ${job.returnVisitTime}`:""}</div>}
           {job.completedDate&&<div style={{color:C.success,fontSize:12,fontWeight:600,marginTop:4}}>✓ Completed {fmt(job.completedDate)}</div>}
         </div>
         <div style={{background:"#1E2530",borderRadius:9,padding:12}}>
@@ -1786,7 +1789,7 @@ function mapBookingRow(row){
     partsNeeded: row.parts_needed, partsOrdered: row.parts_ordered, partsArrived: row.parts_arrived,
     // Return visit booked by the engineer in the Portal when the job couldn't
     // be finished first time (see 0009_return_visit.sql). Read-only here.
-    returnVisitDate: row.return_visit_date||"", returnVisitTime: row.return_visit_time?String(row.return_visit_time).slice(0,5):"",
+    returnVisitDate: row.return_visit_date||"", returnVisitTime: row.return_visit_time?(/^\d/.test(String(row.return_visit_time))?String(row.return_visit_time).slice(0,5):String(row.return_visit_time)):"",
     rate: row.rate, paid: row.paid, notes: row.notes||"",
     // Customer has paid (recorded by the engineer in the Portal, or by the office) -- 0008_payment_taken.sql.
     paymentTaken: !!row.payment_taken, paymentTakenAt: row.payment_taken_at||null,
