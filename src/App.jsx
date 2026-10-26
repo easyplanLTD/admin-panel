@@ -1,4 +1,4 @@
-import { useState, useMemo, useEffect, useRef } from "react";
+import { useState, useMemo, useEffect, useRef, useCallback } from "react";
 import { supabase } from "./lib/supabaseClient";
 import { PaymentsSettings, JobPaymentPanel, JobStatusActions, DisputesView, CustomerPaymentsPanel, PlanBillingPanel, useOpenFlagsCount } from "./PaymentsAdmin";
 import { mapPaymentFields, isStripeJob } from "./paymentsShared";
@@ -775,7 +775,141 @@ function EngineerNotes({ jobId }) {
   );
 }
 
-function JobDetail({job,onClose,onEdit,onReassign,onDelete,engineers,isOwner,onPaymentChanged}) {
+// ─── SEND SMS ────────────────────────────────────────────────────────────────
+// One-off text to an SP, sent by the send-sms Edge Function from the
+// "EasyRepair" sender. That sender is one-way (SPs can't reply), so the
+// function always adds the office number to the end -- mirrored here so the
+// preview/character count shows exactly what the SP will receive.
+const SMS_CONTACT_NUMBER = "0333 041 3909";
+const SMS_SIGN_OFF = `Questions? Call EasyRepair on ${SMS_CONTACT_NUMBER}.`;
+const SMS_MAX_CHARS = 600;
+function smsWithSignOff(msg){
+  const compact = s => s.replace(/\s/g,"");
+  return compact(msg).includes(compact(SMS_CONTACT_NUMBER)) ? msg : `${msg}\n\n${SMS_SIGN_OFF}`;
+}
+// GSM-7 texts fit 160 chars (153 per part when split); anything outside that
+// alphabet -- emoji, curly quotes -- drops the whole message to 70 (67).
+const GSM7 = /^[@£$¥èéùìòÇ\nØø\rÅåΔ_ΦΓΛΩΠΨΣΘΞÆæßÉ !"#¤%&'()*+,\-./0-9:;<=>?¡A-ZÄÖÑÜ§¿a-zäöñüà^{}\\[~\]|€]*$/;
+function smsSegments(text){
+  const gsm = GSM7.test(text);
+  const len = text.length;
+  const [single,multi] = gsm?[160,153]:[70,67];
+  return { len, gsm, parts: len<=single?1:Math.ceil(len/multi) };
+}
+function toE164UKClient(raw){
+  if(!raw) return null;
+  const d = String(raw).replace(/[^\d+]/g,"");
+  if(d.startsWith("+")) return d;
+  if(d.startsWith("0044")) return "+44"+d.slice(4);
+  if(d.startsWith("44")) return "+"+d;
+  if(d.startsWith("0")) return "+44"+d.slice(1);
+  return "+"+d;
+}
+
+function SendSmsModal({recipient,onClose}){
+  // recipient: { name, phone, engineerId?, bookingId?, bookingRef? }
+  const first = (recipient.name||"").trim().split(/\s+/)[0] || "there";
+  const ref = recipient.bookingRef;
+  const templates = [
+    ref && {label:"Job update",       text:`Hi ${first}, quick update on job ${ref}: `},
+    ref && {label:"Update status",    text:`Hi ${first}, please update the status of job ${ref} in the Portal as soon as you can. Thanks.`},
+    ref && {label:"Contact customer", text:`Hi ${first}, please contact the customer for job ${ref} as soon as possible to arrange the visit. Thanks.`},
+    {label:"New job waiting", text:`Hi ${first}, you have a new job waiting in the Portal. Please check and accept it as soon as possible. Thanks.`},
+    {label:"Please call us",  text:`Hi ${first}, please give us a call when you get a moment. Thanks.`},
+  ].filter(Boolean);
+
+  const [msg,setMsg]       = useState("");
+  const [busy,setBusy]     = useState(false);
+  const [err,setErr]       = useState("");
+  const [sentOk,setSentOk] = useState(false);
+  const [history,setHistory] = useState([]);
+
+  const loadHistory = useCallback(async()=>{
+    let q = supabase.from("sms_messages").select("id,created_at,body,status,error,sent_by_name").order("created_at",{ascending:false}).limit(5);
+    q = recipient.engineerId ? q.eq("engineer_id",recipient.engineerId) : q.eq("to_phone",toE164UKClient(recipient.phone)||"");
+    const { data } = await q;
+    setHistory(data||[]);
+  },[recipient.engineerId,recipient.phone]);
+  useEffect(()=>{ loadHistory(); },[loadHistory]);
+
+  const trimmed = msg.trim();
+  const finalText = trimmed ? smsWithSignOff(trimmed) : "";
+  const seg = smsSegments(finalText);
+  const tooLong = trimmed.length > SMS_MAX_CHARS;
+
+  async function send(){
+    if(busy) return;
+    setErr(""); setSentOk(false);
+    if(!recipient.phone){ setErr("No phone number on file for this SP."); return; }
+    if(!trimmed){ setErr("Type a message first."); return; }
+    if(tooLong){ setErr(`Message is too long (max ${SMS_MAX_CHARS} characters).`); return; }
+    setBusy(true);
+    const res = await invokeAuthed("send-sms",{
+      to: recipient.phone, message: trimmed, recipientName: recipient.name||null,
+      engineerId: recipient.engineerId||null, bookingId: recipient.bookingId||null,
+    });
+    setBusy(false);
+    const e = res.data?.error || (res.error ? await edgeFnErrorMessage(res.error,"SMS failed to send") : null);
+    if(e){ setErr(e); loadHistory(); return; }
+    setSentOk(true); setMsg(""); loadHistory();
+  }
+
+  return (
+    <Modal title={`Text ${recipient.name||"SP"}`} onClose={onClose} accent>
+      <div style={{fontSize:12,color:C.mid,marginBottom:12}}>
+        To <strong style={{color:C.text}}>{recipient.phone||"— no phone on file —"}</strong>{ref?<> · re job <strong style={{color:C.text}}>{ref}</strong></>:null}
+        <div style={{fontSize:11,color:C.light,marginTop:3}}>Sent from "EasyRepair". SPs can't reply to it, so our number is added to the end automatically.</div>
+      </div>
+
+      <Fl label="Quick templates">
+        <div style={{display:"flex",gap:6,flexWrap:"wrap"}}>
+          {templates.map(t=><Btn key={t.label} sm variant="ghost" onClick={()=>{setMsg(t.text);setSentOk(false);}}>{t.label}</Btn>)}
+        </div>
+      </Fl>
+
+      <Fl label="Message">
+        <textarea value={msg} onChange={e=>{setMsg(e.target.value);setSentOk(false);}} rows={5} placeholder="Type your message…" style={{...inp,resize:"vertical",lineHeight:1.45}} autoFocus/>
+      </Fl>
+
+      {finalText&&(
+        <div style={{background:"#1E2530",borderRadius:9,padding:12,marginBottom:10}}>
+          <div style={{fontSize:10,color:C.light,fontWeight:700,textTransform:"uppercase",marginBottom:5}}>What the SP will receive</div>
+          <div style={{fontSize:13,color:C.text,whiteSpace:"pre-wrap"}}>{finalText}</div>
+          <div style={{fontSize:11,color:tooLong?C.danger:C.light,marginTop:8}}>
+            {seg.len} characters · {seg.parts} SMS{seg.parts>1?" (charged per part)":""}{!seg.gsm&&" · contains emoji/special characters, which shortens each part to 70"}
+          </div>
+        </div>
+      )}
+
+      {err&&<div style={{background:C.dangerLight,color:C.danger,borderRadius:7,padding:"8px 11px",fontSize:12,marginBottom:10}}>{err}</div>}
+      {sentOk&&<div style={{background:C.successLight,color:C.success,borderRadius:7,padding:"8px 11px",fontSize:12,marginBottom:10}}>✓ Text sent.</div>}
+
+      <div style={{display:"flex",gap:8,justifyContent:"flex-end"}}>
+        <Btn variant="ghost" onClick={onClose}>Close</Btn>
+        <Btn onClick={send} style={{opacity:busy||!trimmed||!recipient.phone?0.5:1}}>{busy?"Sending…":"Send text"}</Btn>
+      </div>
+
+      {history.length>0&&(
+        <div style={{marginTop:18,borderTop:`1px solid ${C.border}`,paddingTop:12}}>
+          <div style={{fontSize:10,color:C.light,fontWeight:700,textTransform:"uppercase",marginBottom:8}}>Recent texts to {first}</div>
+          <div style={{display:"flex",flexDirection:"column",gap:10}}>
+            {history.map(h=>(
+              <div key={h.id}>
+                <div style={{fontSize:11,color:C.light,marginBottom:2}}>
+                  {fmtDateTime(h.created_at)}{h.sent_by_name?` · ${h.sent_by_name}`:""} · <span style={{color:h.status==="sent"?C.success:C.danger,fontWeight:700}}>{h.status==="sent"?"Sent":"Failed"}</span>
+                </div>
+                <div style={{fontSize:12,color:C.mid,whiteSpace:"pre-wrap"}}>{h.body}</div>
+                {h.error&&<div style={{fontSize:11,color:C.danger}}>{h.error}</div>}
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+    </Modal>
+  );
+}
+
+function JobDetail({job,onClose,onEdit,onReassign,onDelete,engineers,isOwner,onPaymentChanged,onTextSp}) {
   const eng = engineers.find(e=>e.id===job.engineerId);
   return (
     <div>
@@ -812,8 +946,10 @@ function JobDetail({job,onClose,onEdit,onReassign,onDelete,engineers,isOwner,onP
               {job.externalCompany&&<div style={{color:C.mid,fontSize:12,marginTop:2}}>{job.externalCompany}</div>}
               {job.externalPhone&&<div style={{color:C.mid,fontSize:12,marginTop:2}}><CallLink phone={job.externalPhone}/></div>}
               {job.externalEmail&&<div style={{color:C.mid,fontSize:12}}>✉ {job.externalEmail}</div>}
+              {onTextSp&&job.externalPhone&&<Btn onClick={()=>onTextSp({name:job.externalName,phone:job.externalPhone,bookingId:job.id,bookingRef:job.bookingRef||('#'+job.id)})} variant="ghost" sm style={{marginTop:8,marginRight:6}}>💬 Text SP</Btn>}
             </>
-          ) : eng?<><div style={{fontWeight:700,fontSize:14}}>{eng.name}</div><div style={{color:C.mid,fontSize:12,marginTop:2}}><CallLink phone={eng.phone}/></div></>
+          ) : eng?<><div style={{fontWeight:700,fontSize:14}}>{eng.name}</div><div style={{color:C.mid,fontSize:12,marginTop:2}}><CallLink phone={eng.phone}/></div>
+              {onTextSp&&eng.phone&&<Btn onClick={()=>onTextSp({name:eng.name,phone:eng.phone,engineerId:eng.id,bookingId:job.id,bookingRef:job.bookingRef||('#'+job.id)})} variant="ghost" sm style={{marginTop:8,marginRight:6}}>💬 Text SP</Btn>}</>
               :<div style={{color:C.danger,fontStyle:"italic",fontSize:13}}>Not assigned</div>}
           <Btn onClick={onReassign} variant="ghost" sm style={{marginTop:8}}>⇄ Reassign SP</Btn>
         </div>
@@ -1337,7 +1473,7 @@ function AddExternalSpModal({onCreated,onCancel}) {
 // reset-password affordance (no Portal login to reset), but otherwise
 // mirrors the in-house card layout (stats row, postcode/appliance chips,
 // owed banner, recent jobs) so the two rosters feel like one feature.
-function ExternalSpsSection({externalSps,extTab,onExtTabChange,jobs,isOwner,accent,onAdd,onEdit,onArchive,onRestore,onDelete,onOpenJob}){
+function ExternalSpsSection({externalSps,extTab,onExtTabChange,jobs,isOwner,accent,onAdd,onEdit,onArchive,onRestore,onDelete,onOpenJob,onText}){
   const shown = externalSps.filter(sp=>extTab==="archived"?!!sp.archivedAt:!sp.archivedAt);
   const counts = {
     active: externalSps.filter(sp=>!sp.archivedAt).length,
@@ -1394,6 +1530,7 @@ function ExternalSpsSection({externalSps,extTab,onExtTabChange,jobs,isOwner,acce
                   </div>
                 </div>
                 {isOwner&&sp.rate!=null&&<span style={{fontWeight:800,color:accent,fontSize:13}}>£{sp.rate}/job</span>}
+                {onText&&sp.phone&&<Btn onClick={e=>{e.stopPropagation();onText({name:sp.name,phone:sp.phone});}} variant="ghost" sm>💬 Text</Btn>}
                 <Btn onClick={()=>onEdit(sp)} variant="ghost" sm>Edit</Btn>
                 <Btn onClick={()=>onArchive(sp)} variant="ghost" sm style={{color:C.danger}}>Archive</Btn>
               </div>
@@ -2623,6 +2760,7 @@ export default function App() {
   const [showNew,setShowNew]      = useState(false);
   const [reassign,setReassign]    = useState(null);
   const [editEng,setEditEng]      = useState(null);
+  const [smsTo,setSmsTo]          = useState(null);   // { name, phone, engineerId?, bookingId?, bookingRef? } -> SendSmsModal
   const [showAddEng,setShowAddEng]= useState(false);
   const [fsStatus,setFsStatus]    = useState("All");
   const [fsEng,setFsEng]          = useState("All");
@@ -3749,6 +3887,7 @@ export default function App() {
                   jobs={jobs} isOwner={isOwner} accent={C.purple}
                   onAdd={()=>setShowAddExternalSp(true)}
                   onEdit={setEditExternalSp}
+                  onText={setSmsTo}
                   onArchive={(sp)=>askArchiveExt(sp.id,sp.name)}
                   onRestore={(sp)=>restoreExternalSp(sp.id)}
                   onDelete={(sp)=>askDeleteExt(sp.id,sp.name)}
@@ -3842,6 +3981,7 @@ export default function App() {
                       {isOwner&&owed>0&&<span style={{fontSize:11,color:"#f87171",fontWeight:700,flex:"0 0 auto"}}>£{owed} owed</span>}
 
                       <div style={{display:"flex",gap:6,flex:"0 0 auto"}} onClick={e=>e.stopPropagation()}>
+                        {eng.phone&&<Btn onClick={()=>setSmsTo({name:eng.name,phone:eng.phone,engineerId:eng.id})} variant="ghost" sm>💬 Text</Btn>}
                         <Btn onClick={()=>setEditEng(eng)} variant="ghost" sm>Edit</Btn>
                         <Btn onClick={()=>askResetPassword(eng.profileId,eng.name)} variant="ghost" sm>Reset Password</Btn>
                         <Btn onClick={()=>askArchive(eng.profileId,eng.name)} variant="ghost" sm style={{color:C.danger}}>Archive</Btn>
@@ -3855,6 +3995,7 @@ export default function App() {
                         <Av initials={eng.name.split(" ").map(w=>w[0]).join("")} color={accent}/>
                         <div style={{flex:1,minWidth:120}}><div style={{fontWeight:800,fontSize:14,display:"flex",alignItems:"center",gap:6}}>{eng.name}{eng.isTest&&<TestPill/>}</div>{eng.businessName&&<div style={{color:C.mid,fontSize:11,fontWeight:600}}>{eng.businessName}</div>}<div style={{color:C.light,fontSize:11}}><CallLink phone={eng.phone}/> · {eng.email}</div></div>
                         {isOwner&&<span style={{fontWeight:800,color:accent,fontSize:13}}>£{eng.rate}/job</span>}
+                        {eng.phone&&<Btn onClick={e=>{e.stopPropagation();setSmsTo({name:eng.name,phone:eng.phone,engineerId:eng.id});}} variant="ghost" sm>💬 Text</Btn>}
                         <Btn onClick={e=>{e.stopPropagation();setEditEng(eng);}} variant="ghost" sm>Edit</Btn>
                         <Btn onClick={e=>{e.stopPropagation();askResetPassword(eng.profileId,eng.name);}} variant="ghost" sm>Reset Password</Btn>
                         <Btn onClick={e=>{e.stopPropagation();askArchive(eng.profileId,eng.name);}} variant="ghost" sm style={{color:C.danger}}>Archive</Btn>
@@ -4031,7 +4172,7 @@ export default function App() {
       )}
       {selJob&&!editJob&&!reassign&&(
         <Modal title={`Job ${selJob.bookingRef||('#'+selJob.id)} — ${selJob.customer}`} onClose={()=>setSelJob(null)} wide>
-          <JobDetail job={selJob} onClose={()=>setSelJob(null)} onEdit={()=>{setEditJob(selJob);setSelJob(null);}} onReassign={()=>setReassign(selJob)} onDelete={isOwner?()=>askDeleteJob(selJob):undefined} engineers={engineers} isOwner={isOwner} onPaymentChanged={refreshSelJob}/>
+          <JobDetail job={selJob} onClose={()=>setSelJob(null)} onEdit={()=>{setEditJob(selJob);setSelJob(null);}} onReassign={()=>setReassign(selJob)} onDelete={isOwner?()=>askDeleteJob(selJob):undefined} engineers={engineers} isOwner={isOwner} onPaymentChanged={refreshSelJob} onTextSp={setSmsTo}/>
         </Modal>
       )}
       {reassign&&(
@@ -4052,6 +4193,7 @@ export default function App() {
           <EngineerJobsList eng={selEngJobs} jobs={jobs} onOpenJob={job=>{setSelEngJobs(null);setSelJob(job);}}/>
         </Modal>
       )}
+      {smsTo&&<SendSmsModal recipient={smsTo} onClose={()=>setSmsTo(null)}/>}
       {editEng&&(
         <Modal title={`Edit SP: ${editEng.name}`} onClose={()=>setEditEng(null)} wide>
           <EngineerEditor eng={editEng} onSave={saveEng} onCancel={()=>setEditEng(null)} isOwner={isOwner}/>
