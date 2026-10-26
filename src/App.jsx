@@ -1473,7 +1473,7 @@ function AddExternalSpModal({onCreated,onCancel}) {
 // reset-password affordance (no Portal login to reset), but otherwise
 // mirrors the in-house card layout (stats row, postcode/appliance chips,
 // owed banner, recent jobs) so the two rosters feel like one feature.
-function ExternalSpsSection({externalSps,extTab,onExtTabChange,jobs,isOwner,accent,onAdd,onEdit,onArchive,onRestore,onDelete,onOpenJob,onText}){
+function ExternalSpsSection({externalSps,extTab,onExtTabChange,jobs,isOwner,accent,onAdd,onEdit,onArchive,onRestore,onDelete,onOpenJob,onText,onConvert}){
   const shown = externalSps.filter(sp=>extTab==="archived"?!!sp.archivedAt:!sp.archivedAt);
   const counts = {
     active: externalSps.filter(sp=>!sp.archivedAt).length,
@@ -1532,6 +1532,7 @@ function ExternalSpsSection({externalSps,extTab,onExtTabChange,jobs,isOwner,acce
                 {isOwner&&sp.rate!=null&&<span style={{fontWeight:800,color:accent,fontSize:13}}>£{sp.rate}/job</span>}
                 {onText&&sp.phone&&<Btn onClick={e=>{e.stopPropagation();onText({name:sp.name,phone:sp.phone});}} variant="ghost" sm>💬 Text</Btn>}
                 <Btn onClick={()=>onEdit(sp)} variant="ghost" sm>Edit</Btn>
+                {onConvert&&<Btn onClick={()=>onConvert(sp)} variant="ghost" sm style={{color:C.primary}}>→ Make In-house</Btn>}
                 <Btn onClick={()=>onArchive(sp)} variant="ghost" sm style={{color:C.danger}}>Archive</Btn>
               </div>
 
@@ -1699,6 +1700,117 @@ function AddEngineerModal({onCreated,onCancel,defaultType}) {
       <div style={{display:"flex",gap:10}}>
         <Btn onClick={submit} full style={{padding:"10px 0",opacity:busy?.7:1}}>{busy?"Creating…":"Create SP"}</Btn>
         <Btn onClick={onCancel} variant="ghost" full style={{padding:"10px 0"}}>Cancel</Btn>
+      </div>
+    </Modal>
+  );
+}
+
+// ─── CONVERT EXTERNAL SP → IN-HOUSE — for when someone who's been doing
+// one-off jobs as an External SP decides to come onboard. Creates their
+// Portal login + engineers row via create-user (same as AddEngineerModal),
+// pre-filled with the external SP's coverage, skills and brand exclusions;
+// copies their ID/insurance documents into their own storage folder (so they
+// can see them in the Portal too); then convert_external_sp()
+// (0022_convert_external_sp.sql) moves all their bookings across silently,
+// carries their stats over and archives the external roster row. ─────────────
+function ConvertExternalSpModal({sp,jobs,onDone,onCancel}) {
+  const [f,setF] = useState({name:sp.name||"",businessName:sp.company||"",email:sp.email||"",phone:sp.phone||"",rate:sp.rate??45,type:"appliance",provisioning:"invite",password:""});
+  const [busy,setBusy] = useState(false);
+  const [err,setErr] = useState("");
+  // If the login was created but a later step failed, a retry must not try
+  // to create the login again (create-user would reject the duplicate email).
+  const [createdUserId,setCreatedUserId] = useState(null);
+  const set=(k,v)=>setF(p=>({...p,[k]:v}));
+  const spInp = {...inp, border:`1.5px solid ${C.primary}`};
+
+  const spJobs = jobs.filter(j=>j.externalEngineerId===sp.id);
+  const openJobs = spJobs.filter(j=>!["Completed","Beyond Repair","Cancelled"].includes(j.status)).length;
+  const docs = [sp.idDocumentPath&&"ID", sp.insuranceDocumentPath&&"insurance"].filter(Boolean);
+
+  const copyDoc = async (fromPath, key, profileId) => {
+    if(!fromPath) return null;
+    const ext = fromPath.split(".").pop()||"pdf";
+    const to = `${profileId}/${key}-document.${ext}`;
+    const { error } = await supabase.storage.from("engineer-documents").copy(fromPath, to);
+    // Falls back to the original path: staff can still open it, the SP can
+    // re-upload from the Portal if they need to.
+    return error ? null : to;
+  };
+
+  const submit = async () => {
+    setErr("");
+    if(!f.name||!f.email){setErr("Name and email are required — the email is where their Portal invite goes.");return;}
+    if(f.provisioning==="password"&&f.password.length<8){setErr("Password must be at least 8 characters.");return;}
+    setBusy(true);
+    let userId = createdUserId;
+    if(!userId){
+      const { data, error } = await invokeAuthed("create-user", {
+        name:f.name, email:f.email, phone:f.phone, role:"engineer",
+        provisioning:f.provisioning, password:f.provisioning==="password"?f.password:undefined,
+        engineer:{ payRate:Number(f.rate)||45, type:f.type, postcodes:sp.postcodes||[], applianceTypes:sp.applianceTypes||[], brandExclusions:sp.brandExclusions||{}, selfServiceEnabled:true },
+      });
+      if(error||data?.error){ setBusy(false); setErr(data?.error || await edgeFnErrorMessage(error,"Something went wrong creating this SP's Portal login.")); return; }
+      userId = data.userId; setCreatedUserId(userId);
+    }
+    if(f.businessName.trim()){
+      await supabase.from("engineers").update({business_name:f.businessName.trim()}).eq("profile_id",userId);
+    }
+    const idPath  = await copyDoc(sp.idDocumentPath,"id",userId);
+    const insPath = await copyDoc(sp.insuranceDocumentPath,"insurance",userId);
+    const { data:res, error:rpcErr } = await supabase.rpc("convert_external_sp", {
+      p_external_id: sp.id, p_profile_id: userId, p_id_doc_path: idPath, p_ins_doc_path: insPath,
+    });
+    setBusy(false);
+    if(rpcErr){ setErr(`Their Portal login was created, but moving their jobs across failed: ${rpcErr.message}. Click "Try again" to finish.`); return; }
+    onDone({...res, type:f.type, name:f.name});
+  };
+
+  return (
+    <Modal title={`Make ${sp.name} an In-house SP`} onClose={busy?()=>{}:onCancel} accent>
+      {err&&<div style={{background:"rgba(248,113,113,0.15)",color:"#f87171",borderRadius:7,padding:"8px 12px",fontSize:13,marginBottom:12,fontWeight:600}}>{err}</div>}
+      <div style={{fontSize:12,color:C.mid,lineHeight:1.55,marginBottom:12}}>
+        This gives {sp.name||"them"} a Portal login and moves them to In-house SP's. Carried across automatically:
+        <ul style={{margin:"6px 0 0 18px",padding:0}}>
+          <li><strong style={{color:C.text}}>{spJobs.length}</strong> job{spJobs.length===1?"":"s"} ({openJobs} open) — moved to their new profile, with no texts or emails sent to customers or to them</li>
+          <li>{sp.postcodes.length} postcode area{sp.postcodes.length===1?"":"s"}, {sp.applianceTypes.length} appliance type{sp.applianceTypes.length===1?"":"s"} and any brand exclusions</li>
+          <li>{docs.length?`Their ${docs.join(" and ")} document${docs.length>1?"s":""}`:"No documents on file"}{sp.insuranceExpiryDate?" and insurance expiry date":""}</li>
+        </ul>
+        <div style={{marginTop:6}}>Their External SP record is archived afterwards, not deleted.</div>
+      </div>
+      <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:10}}>
+        <Fl label="Full Name"><input style={spInp} value={f.name} disabled={!!createdUserId} onChange={e=>set("name",e.target.value)}/></Fl>
+        <Fl label="Business Name"><input style={spInp} value={f.businessName} onChange={e=>set("businessName",e.target.value)} placeholder="e.g. Hall Appliance Repairs"/></Fl>
+        <Fl label="Phone"><input style={spInp} value={f.phone} disabled={!!createdUserId} onChange={e=>set("phone",e.target.value)} placeholder="07..."/></Fl>
+        <Fl label="Email"><input style={spInp} value={f.email} disabled={!!createdUserId} onChange={e=>set("email",e.target.value)} placeholder="Needed for their Portal login"/></Fl>
+        <Fl label="Pay Rate (£ per job)"><input type="number" style={spInp} value={f.rate} disabled={!!createdUserId} onChange={e=>set("rate",e.target.value)}/></Fl>
+        <Fl label="SP Type">
+          <select style={spInp} value={f.type} disabled={!!createdUserId} onChange={e=>set("type",e.target.value)}>
+            {SP_TYPES.map(t=><option key={t.key} value={t.key}>{t.label}</option>)}
+          </select>
+        </Fl>
+      </div>
+      {!createdUserId&&(
+      <div style={{background:C.primaryLight,border:`1px solid #BFDBFE`,borderRadius:9,padding:"12px 14px",marginTop:6,marginBottom:14}}>
+        <div style={{fontSize:12,fontWeight:700,color:C.primary,marginBottom:9}}>Portal Access</div>
+        <label style={{display:"flex",alignItems:"center",gap:8,fontSize:13,marginBottom:8,cursor:"pointer"}}>
+          <input type="radio" checked={f.provisioning==="invite"} onChange={()=>set("provisioning","invite")}/>
+          Email them an invite link to set their own password (recommended)
+        </label>
+        <label style={{display:"flex",alignItems:"center",gap:8,fontSize:13,cursor:"pointer"}}>
+          <input type="radio" checked={f.provisioning==="password"} onChange={()=>set("provisioning","password")}/>
+          Set a temporary password myself
+        </label>
+        {f.provisioning==="password"&&(
+          <div style={{marginTop:10}}>
+            <input style={spInp} type="text" value={f.password} onChange={e=>set("password",e.target.value)} placeholder="Temporary password (min 8 characters)"/>
+            <div style={{fontSize:11,color:C.light,marginTop:5}}>Share this password with the SP directly — they can change it once logged in to portal.easyrepair.co.uk.</div>
+          </div>
+        )}
+      </div>
+      )}
+      <div style={{display:"flex",gap:10,marginTop:createdUserId?14:0}}>
+        <Btn onClick={busy?undefined:submit} full style={{padding:"10px 0",opacity:busy?.7:1}}>{busy?"Converting…":createdUserId?"Try again":"Make In-house SP"}</Btn>
+        <Btn onClick={busy?undefined:onCancel} variant="ghost" full style={{padding:"10px 0"}}>Cancel</Btn>
       </div>
     </Modal>
   );
@@ -2777,6 +2889,8 @@ export default function App() {
   const [externalSps,setExternalSps]   = useState([]);     // External SP's roster (0007_external_sps.sql)
   const [showAddExternalSp,setShowAddExternalSp] = useState(false);
   const [editExternalSp,setEditExternalSp] = useState(null);
+  const [convertExternalSp,setConvertExternalSp] = useState(null); // External SP being turned into an in-house SP (ConvertExternalSpModal)
+  const [convertNotice,setConvertNotice] = useState("");
   const [extTab,setExtTab]        = useState("active");    // "active" | "archived" -- External SP's page's own StatusTabs (no "onboarding": no Portal account to onboard)
   const [extConfirm,setExtConfirm]     = useState(null);   // {kind:"archive"|"delete", id, label}
   const [extConfirmBusy,setExtConfirmBusy] = useState(false);
@@ -3892,6 +4006,7 @@ export default function App() {
                   onRestore={(sp)=>restoreExternalSp(sp.id)}
                   onDelete={(sp)=>askDeleteExt(sp.id,sp.name)}
                   onOpenJob={setSelJob}
+                  onConvert={(sp)=>{setConvertNotice("");setConvertExternalSp(sp);}}
                 />
               ) : (<>
               <div className="flex flex-col md:flex-row md:justify-between md:items-center" style={{gap:10,marginBottom:16}}>
@@ -4204,6 +4319,21 @@ export default function App() {
       )}
       {showAddExternalSp&&(
         <AddExternalSpModal onCreated={()=>{loadExternalSps();setShowAddExternalSp(false);}} onCancel={()=>setShowAddExternalSp(false)}/>
+      )}
+      {convertExternalSp&&(
+        <ConvertExternalSpModal sp={convertExternalSp} jobs={jobs}
+          onCancel={()=>setConvertExternalSp(null)}
+          onDone={async (r)=>{
+            setConvertExternalSp(null);
+            await Promise.all([loadEngineers(),loadBookings(),loadExternalSps()]);
+            setSpType(r.type||"appliance"); setEngTab("onboarding"); // new login -> onboarding until they set a password + accept terms
+            setConvertNotice(`${r.name} is now an In-house SP${r.bookingsMoved?` — ${r.bookingsMoved} job${r.bookingsMoved===1?"":"s"} moved across`:""}.`);
+          }}/>
+      )}
+      {convertNotice&&(
+        <div onClick={()=>setConvertNotice("")} style={{position:"fixed",bottom:20,left:"50%",transform:"translateX(-50%)",zIndex:1000,background:C.card,border:`1.5px solid ${C.primary}`,boxShadow:`0 0 18px ${C.primary}44`,color:C.text,borderRadius:10,padding:"10px 16px",fontSize:13,fontWeight:700,cursor:"pointer",maxWidth:"calc(100vw - 32px)"}}>
+          ✓ {convertNotice} <span style={{color:C.light,fontWeight:500,marginLeft:6}}>Dismiss</span>
+        </div>
       )}
       {editExternalSp&&(
         <Modal title={`Edit External SP: ${editExternalSp.name}`} onClose={()=>setEditExternalSp(null)} wide>
