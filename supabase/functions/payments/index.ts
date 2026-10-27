@@ -21,6 +21,12 @@
 //   * Protection plans, late-cancellation and no-show fees are EasyRepair's
 //     own charges on the platform account (no-show: engineer's share is
 //     transferred to them).
+//   * External SP jobs (bookings.is_external, migration 0022): staff enter the
+//     call-out and parts amounts in FixFlow (send_external_link) and the
+//     customer pays EasyRepair's own account -- no Connect split. The SP is
+//     paid by bank transfer and that's recorded on the booking in FixFlow.
+//     Needs payment_intent.succeeded / payment_failed, charge.refunded and
+//     charge.dispute.created on the "Your account" webhook endpoint too.
 //
 // Deploy: Supabase dashboard -> Edge Functions -> Deploy a new function ->
 // name "payments", paste this file, and turn OFF "Verify JWT" (payment links
@@ -123,8 +129,22 @@ export function termsFor(b: any, s: any, overrides: any[] = []) {
   return t;
 }
 
+// External SP job with amounts entered in FixFlow (send_external_link): the
+// customer pays EasyRepair's own account; the SP is paid by bank transfer.
+export const isExternalPayable = (b: any) => !!b?.is_external && b.ext_callout_pence != null;
+export function externalCharge(b: any) {
+  const callout = Number(b.ext_callout_pence || 0);
+  const parts = b.pending_outcome === "Beyond Repair" ? 0 : Number(b.ext_parts_pence || 0);
+  const adminFee = b.admin_fee_applied_at ? Number(b.admin_fee_pence || 0) : 0;
+  const total = callout + parts + adminFee;
+  const engineerShare = Math.min(total, Number(b.sp_payout_pence || 0));
+  const terms = { engineer_callout_share: 0, engineer_parts_share: 0, fee_bearer: "easyrepair" };
+  return { terms, callout, parts, adminFee, total, engineerShare, commission: total - engineerShare };
+}
+
 // What to charge for a job right now: callout + approved parts + admin fee.
 export function jobCharge(b: any, s: any, overrides: any[] = []) {
+  if (isExternalPayable(b)) return externalCharge(b);
   const terms = termsFor(b, s, overrides);
   const callout = calloutPence(b, s);
   // Beyond economical repair: the customer pays the callout only.
@@ -746,11 +766,67 @@ async function applyAdminFee(c: Caller, body: any) {
   const b = await booking(body.bookingId);
   requireLive(s, c, b);
   if (b.admin_fee_applied_at) fail("The admin fee has already been added.");
-  if (b.payment_timing !== "after") fail("The admin fee only applies to Pay after repair bookings.");
+  if (b.payment_timing !== "after" && !isExternalPayable(b)) fail("The admin fee only applies to Pay after repair bookings and external SP payment links.");
   if (b.payment_status === "paid") fail("This job has already been paid.");
   await updateBooking(b.id, { admin_fee_pence: s.admin_fee_pence, admin_fee_applied_at: new Date().toISOString() });
   return await sendPaymentLinkFor({ ...b, admin_fee_pence: s.admin_fee_pence, admin_fee_applied_at: new Date().toISOString() },
     `As payment wasn't made on the day, a ${gbp(s.admin_fee_pence)} admin fee has been added.`);
+}
+
+// ─── External SP jobs (FixFlow) ──────────────────────────────────────────
+// Staff enter the call-out and parts amounts and what the SP is owed, and the
+// customer gets a payment link for EasyRepair's own Stripe account (no
+// Connect split). Re-sending with new amounts updates the same link. The job
+// completes by itself with the chosen outcome once the customer pays, and
+// the SP's payout is marked "owed" for staff to pay by bank transfer.
+//   method: "sms" | "email" | "both" | "none" (just make the link to copy)
+async function sendExternalLink(c: Caller, body: any) {
+  requireStaff(c);
+  const s = await settings();
+  const b = await booking(body.bookingId);
+  requireLive(s, c, b);
+  if (!b.is_external) fail("This isn't an external SP job.");
+  if (b.status === "Cancelled") fail("This job is cancelled.");
+  if (["paid", "processing", "refunded", "part_refunded"].includes(b.payment_status)) fail("This job has already been paid.");
+  const pence = (v: unknown, what: string, required = false) => {
+    if (v === "" || v == null) return required ? fail(`Enter the ${what}.`) : 0;
+    const n = Math.round(Number(v));
+    if (!Number.isFinite(n) || n < 0) fail(`The ${what} isn't a valid amount.`);
+    return n;
+  };
+  const callout = pence(body.calloutPence, "call-out fee", true);
+  const parts = pence(body.partsPence, "parts amount");
+  const payout = pence(body.spPayoutPence, "amount owed to the SP");
+  if (callout + parts < 50) fail("The total must be at least £0.50 (Stripe's minimum).");
+  if (payout > callout + parts) fail("The SP payout can't be more than the customer pays.");
+  const outcome = body.outcome === "Beyond Repair" ? "Beyond Repair" : "Completed";
+  const closed = ["Completed", "Beyond Repair"].includes(b.status);
+
+  const url = await payUrl(b.id);
+  const patch: Record<string, unknown> = {
+    ext_callout_pence: callout, ext_parts_pence: parts,
+    ext_parts_description: String(body.partsDescription || "").trim().slice(0, 200) || null,
+    sp_payout_pence: payout,
+    payment_link_url: url, payment_status: "outstanding",
+    awaiting_payment_since: b.awaiting_payment_since || new Date().toISOString(),
+    ...(closed ? {} : { pending_outcome: outcome }),
+  };
+  await updateBooking(b.id, patch);
+  const nb = { ...b, ...patch };
+  const m = externalCharge(nb);
+  await updateBooking(b.id, { total_pence: m.total, commission_pence: m.commission, engineer_share_pence: m.engineerShare });
+
+  const method = String(body.method || "both");
+  if (method === "none") return { url, totalPence: m.total, sent: null };
+  const msg = `EasyRepair: thank you, your ${b.appliance || "appliance"} job (${ref(b)}) is done. Please pay ${gbp(m.total)} securely here: ${url}`;
+  const subject = `Payment for your EasyRepair job ${ref(b)}`;
+  lastSendError = "";
+  const sent = {
+    sms: method === "sms" || method === "both" ? await sendSms(contactFor(b).phone, msg).catch(() => false) : null,
+    email: method === "email" || method === "both" ? await sendEmail(contactFor(b).email, subject, msg).catch(() => false) : null,
+  };
+  const anyOk = sent.sms === true || sent.email === true;
+  return { url, totalPence: m.total, sent, ...(anyOk ? {} : { error: `${lastSendError || "Nothing was sent."} Copy the link and send it another way.` }) };
 }
 
 // Called by the Portal (or FixFlow) as soon as a job is marked completed.
@@ -866,17 +942,19 @@ async function refund(c: Caller, body: any) {
   const s = await settings();
   const b = await booking(body.bookingId);
   requireLive(s, c, b);
-  if (!b.stripe_payment_intent_id || !b.stripe_charge_account_id) fail("This job wasn't paid through Stripe, so record the refund instead.");
+  // External SP jobs were paid to EasyRepair's own account (no connected account).
+  const onPlatform = !!b.is_external && !b.stripe_charge_account_id;
+  if (!b.stripe_payment_intent_id || (!b.stripe_charge_account_id && !onPlatform)) fail("This job wasn't paid through Stripe, so record the refund instead.");
   const total = Number(b.total_pence || 0);
   const amount = Math.round(Number(body.amountPence));
   const already = Number(b.refund_amount_pence || 0);
   if (!(amount > 0) || amount + already > total) fail(`Refund must be between £0.01 and ${gbp(total - already)}.`);
-  const refundCommission = !!body.refundCommission;
+  const refundCommission = !onPlatform && !!body.refundCommission;
   await stripe.refunds.create({
     payment_intent: b.stripe_payment_intent_id, amount,
-    refund_application_fee: refundCommission,
+    ...(onPlatform ? {} : { refund_application_fee: refundCommission }),
     metadata: { booking_id: b.id, refund_reason_id: body.refundReasonId || "", by: "easyrepair" },
-  }, { stripeAccount: b.stripe_charge_account_id, idempotencyKey: `refund-${b.id}-${already}-${amount}` });
+  }, { ...(onPlatform ? {} : { stripeAccount: b.stripe_charge_account_id }), idempotencyKey: `refund-${b.id}-${already}-${amount}` });
   const commissionBack = refundCommission ? Math.round(Number(b.commission_pence || 0) * Math.min(1, amount / Math.max(total, 1))) : 0;
   await updateBooking(b.id, {
     refund_reason_id: body.refundReasonId || null,
@@ -999,8 +1077,10 @@ async function daily(c: Caller) {
   if (!s.payments_live) return { skipped: "payments not live" };
   const today = new Date().toISOString().slice(0, 10);
 
+  // Pay after repair jobs, and external SP jobs with a payment link (0022).
   const { data: unpaid } = await db.from("bookings").select("*")
-    .eq("payment_timing", "after").eq("payment_status", "outstanding")
+    .or("payment_timing.eq.after,and(is_external.eq.true,ext_callout_pence.not.is.null)")
+    .eq("payment_status", "outstanding")
     .is("admin_fee_applied_at", null).lt("awaiting_payment_since", `${today}T00:00:00Z`);
   for (const b of unpaid || []) {
     try { await applyAdminFee(c, { bookingId: b.id }); out.adminFees++; } catch (_) { /* keep going */ }
@@ -1067,21 +1147,27 @@ async function platformAccount() {
 }
 // Link that opens this payment in EasyRepair's Stripe dashboard (it lives on
 // the engineer's connected account).
-async function dashboardUrl(pi: Stripe.PaymentIntent, account: string) {
+// account is null for external SP jobs, which are paid to EasyRepair's own account.
+async function dashboardUrl(pi: Stripe.PaymentIntent, account: string | null) {
   try {
     const platform = await platformAccount();
-    return `https://dashboard.stripe.com/${platform}/${pi.livemode ? "" : "test/"}connect/accounts/${account}/payments/${pi.id}`;
+    const mode = pi.livemode ? "" : "test/";
+    return account
+      ? `https://dashboard.stripe.com/${platform}/${mode}connect/accounts/${account}/payments/${pi.id}`
+      : `https://dashboard.stripe.com/${platform}/${mode}payments/${pi.id}`;
   } catch (_) { return null; }
 }
 
-async function markJobPaid(pi: Stripe.PaymentIntent, account: string) {
+async function markJobPaid(pi: Stripe.PaymentIntent, account: string | null) {
   const bookingId = pi.metadata?.booking_id;
   if (!bookingId) return;
   const { data: b } = await db.from("bookings").select("*").eq("id", bookingId).maybeSingle();
   if (!b || b.payment_status === "paid" && b.stripe_fee_pence != null) return;
+  const external = pi.metadata?.kind === "external_job";
 
-  // Actual Stripe fee for this charge (paid from the engineer's account).
-  const charge = await stripe.charges.retrieve(pi.latest_charge as string, { expand: ["balance_transaction"] }, { stripeAccount: account });
+  // Actual Stripe fee for this charge (paid from the engineer's account, or
+  // EasyRepair's own for an external SP job).
+  const charge = await stripe.charges.retrieve(pi.latest_charge as string, { expand: ["balance_transaction"] }, account ? { stripeAccount: account } : undefined);
   const bt = charge.balance_transaction as Stripe.BalanceTransaction | null;
   // On a direct charge the engineer's balance transaction "fee" is Stripe's fee
   // PLUS EasyRepair's application fee (commission). Only Stripe's own part
@@ -1120,6 +1206,8 @@ async function markJobPaid(pi: Stripe.PaymentIntent, account: string) {
     engineer_share_pence: pi.metadata?.engineer_share_pence ? Number(pi.metadata.engineer_share_pence) : b.engineer_share_pence,
     payment_taken: true, payment_taken_at: new Date().toISOString(),
     uncollectable_at: null,
+    // External SP job: EasyRepair now owes the SP their payout (bank transfer).
+    ...(external && Number(b.sp_payout_pence || 0) > 0 && b.sp_payout_status !== "paid" ? { sp_payout_status: "owed" } : {}),
     // Paid from the Take payment screen: the job completes now, with the outcome the engineer picked.
     ...(b.pending_outcome && !["Completed", "Beyond Repair", "Cancelled"].includes(b.status)
       ? { status: b.pending_outcome, completed_date: new Date().toISOString().slice(0, 10) } : {}),
@@ -1149,10 +1237,12 @@ async function handleEvent(ev: Stripe.Event) {
 
     case "payment_intent.succeeded":
       if (account && o.metadata?.kind === "job") await markJobPaid(o, account);
+      // External SP job: paid to EasyRepair's own account (the "Your account" endpoint).
+      if (!account && o.metadata?.kind === "external_job") await markJobPaid(o, null);
       break;
 
     case "payment_intent.payment_failed":
-      if (account && o.metadata?.booking_id && o.metadata?.kind === "job") {
+      if (o.metadata?.booking_id && ((account && o.metadata?.kind === "job") || (!account && o.metadata?.kind === "external_job"))) {
         await db.from("bookings").update({ payment_status: "outstanding" }).eq("id", o.metadata.booking_id).eq("payment_status", "processing");
       }
       break;
@@ -1162,8 +1252,10 @@ async function handleEvent(ev: Stripe.Event) {
 
     case "charge.refunded":
       // Records refunds made outside FixFlow (e.g. by Stripe support). Refunds
-      // made from FixFlow are recorded by the refund action itself.
-      if (account && o.payment_intent) {
+      // made from FixFlow are recorded by the refund action itself. Only job
+      // payments are stored on bookings, so platform events (external SP jobs)
+      // are matched the same way.
+      if (o.payment_intent) {
         const { data: b } = await db.from("bookings").select("id,total_pence,refund_amount_pence").eq("stripe_payment_intent_id", o.payment_intent).maybeSingle();
         if (b && Number(b.refund_amount_pence || 0) < o.amount_refunded) {
           await new Promise((r) => setTimeout(r, 5000)); // give the refund action time to record its own
@@ -1179,7 +1271,7 @@ async function handleEvent(ev: Stripe.Event) {
       break;
 
     case "charge.dispute.created":
-      if (account) {
+      if (o.payment_intent) {
         await db.from("bookings").update({ payment_status: "disputed" }).eq("stripe_payment_intent_id", o.payment_intent);
       }
       break;
@@ -1248,6 +1340,7 @@ async function payPage(url: URL) {
   const { data: b } = await db.from("bookings").select("*").eq("id", id).maybeSingle();
   if (!b) return donePage("invalid");
   if (["paid", "refunded", "part_refunded"].includes(b.payment_status)) return donePage("paid", b);
+  if (b.is_external) return await externalCheckout(b);
   if (b.parts_approval_status === "pending" && b.pending_outcome !== "Beyond Repair") return donePage("parts", b);
   const eng = await engineer(b.engineer_id);
   if (eng?.stripe_account_id && !eng.stripe_charges_enabled) eng.stripe_charges_enabled = !!(await refreshAccountById(eng.stripe_account_id)).charges_enabled;
@@ -1281,6 +1374,37 @@ async function payPage(url: URL) {
   return Response.redirect(session.url!, 303);
 }
 
+// External SP job: Checkout on EasyRepair's own Stripe account, amounts as
+// entered in FixFlow, no application fee or connected account.
+async function externalCheckout(b: any) {
+  if (!isExternalPayable(b)) return donePage("unavailable", b);
+  const m = externalCharge(b);
+  if (m.total < 50) return donePage("unavailable", b);
+  const items: any[] = [];
+  if (m.callout > 0) items.push({ quantity: 1, price_data: { currency: "gbp", unit_amount: m.callout, product_data: { name: `Call-out and labour — ${b.appliance || "appliance"} repair (${ref(b)})` } } });
+  if (m.parts > 0) items.push({ quantity: 1, price_data: { currency: "gbp", unit_amount: m.parts, product_data: { name: b.ext_parts_description ? `Parts: ${b.ext_parts_description}` : "Parts" } } });
+  if (m.adminFee > 0) items.push({ quantity: 1, price_data: { currency: "gbp", unit_amount: m.adminFee, product_data: { name: "Late payment admin fee" } } });
+  const session = await stripe.checkout.sessions.create({
+    mode: "payment",
+    line_items: items,
+    customer_email: b.email && !b.is_test ? b.email : undefined,
+    payment_intent_data: {
+      statement_descriptor_suffix: descriptorSuffix(b),
+      description: `EasyRepair job ${ref(b)} (external SP)`,
+      receipt_email: b.email && !b.is_test ? b.email : undefined,
+      metadata: {
+        booking_id: b.id, kind: "external_job", paid_via: "online",
+        commission_pence: String(m.commission), engineer_share_pence: String(m.engineerShare),
+      },
+    },
+    success_url: doneUrl("success", b),
+    cancel_url: await payUrl(b.id),
+    expires_at: Math.floor(Date.now() / 1000) + 3600,
+  });
+  await updateBooking(b.id, { stripe_charge_account_id: null, total_pence: m.total, commission_pence: m.commission, engineer_share_pence: m.engineerShare });
+  return Response.redirect(session.url!, 303);
+}
+
 // Testing only: puts Stripe's test Visa card on a test booking, as if the
 // customer had saved it on the booking form. Refused with live keys.
 async function testAttachCard(c: Caller, body: any) {
@@ -1308,6 +1432,7 @@ const ACTIONS: Record<string, (c: Caller, body: any) => Promise<unknown>> = {
   charge_job: chargeJob,
   send_payment_link: sendPaymentLink,
   apply_admin_fee: applyAdminFee,
+  send_external_link: sendExternalLink,   // FixFlow (staff): external SP jobs
   send_parts_approval: sendPartsApproval,
   parts_quote: partsQuote,                // public (approval page)
   parts_respond: partsRespond,            // public (approval page)
