@@ -140,6 +140,7 @@ export function termsForJob(job, settings, overrides = []) {
 // The full money picture for one job. Parts only count once approved,
 // unless includePending is set (used for "if the customer approves" views).
 export function jobMoney(job, settings, overrides = [], { includePending = false } = {}) {
+  if (job?.isExternal && job.extCalloutPence != null) return externalJobMoney(job);
   const terms = termsForJob(job, settings, overrides);
   const callout = calloutPenceFor(job, settings);
   const partsAll = Number(job?.partsTotalPence || 0);
@@ -171,6 +172,29 @@ export function jobMoney(job, settings, overrides = [], { includePending = false
     engineerNet: (charged ? Number(job.engineerSharePence ?? engineerGross) : engineerGross) - (engineerPaysFee ? fee : 0),
     easyRepairNet: (charged ? Number(job.commissionPence) : commission) - (engineerPaysFee ? 0 : fee),
     charged,
+  };
+}
+
+// External SP job with a one-off payment link: the customer pays EasyRepair
+// the amounts entered in FixFlow, EasyRepair pays the SP by bank transfer and
+// covers the Stripe fee. Mirrors externalCharge() in the payments function.
+export function externalJobMoney(job) {
+  const callout = Number(job.extCalloutPence || 0);
+  const parts = job.pendingOutcome === "Beyond Repair" ? 0 : Number(job.extPartsPence || 0);
+  const adminFee = job.adminFeeAppliedAt ? Number(job.adminFeePence || 0) : 0;
+  const total = callout + parts + adminFee;
+  const payout = Math.min(total, Number(job.spPayoutPence || 0));
+  const actualFee = job.stripeFeePence != null ? Number(job.stripeFeePence) : null;
+  const fee = actualFee != null ? actualFee : estimateStripeFee(total);
+  return {
+    terms: { engineer_callout_share: 0, engineer_parts_share: 0, fee_bearer: "easyrepair", source: "External SP job (amounts set in FixFlow)" },
+    external: true,
+    callout, partsAll: parts, partsApproved: parts, partsPending: 0, adminFee,
+    total, engineerCallout: 0, engineerParts: 0,
+    engineerGross: payout, commission: total - payout,
+    fee, feeIsEstimate: actualFee == null, engineerPaysFee: false,
+    engineerNet: payout, easyRepairNet: total - payout - fee,
+    charged: job.paymentStatus === "paid",
   };
 }
 
@@ -254,6 +278,14 @@ export function mapPaymentFields(row = {}) {
     paidVia: row.paid_via || null,
     cardBrand: row.card_brand || null,
     cardLast4: row.card_last4 || null,
+    // External SP one-off payment link (0022_external_sp_payments.sql)
+    extCalloutPence: row.ext_callout_pence ?? null,
+    extPartsPence: row.ext_parts_pence ?? null,
+    extPartsDescription: row.ext_parts_description || "",
+    spPayoutPence: row.sp_payout_pence ?? null,
+    spPayoutStatus: row.sp_payout_status || null,
+    spPaidAt: row.sp_paid_at || null,
+    spPayoutRef: row.sp_payout_ref || "",
   };
 }
 
