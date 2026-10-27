@@ -1,7 +1,7 @@
 import { useState, useMemo, useEffect, useRef, useCallback } from "react";
 import { supabase } from "./lib/supabaseClient";
-import { PaymentsSettings, JobPaymentPanel, JobStatusActions, DisputesView, CustomerPaymentsPanel, PlanBillingPanel, useOpenFlagsCount } from "./PaymentsAdmin";
-import { mapPaymentFields, isStripeJob } from "./paymentsShared";
+import { PaymentsSettings, JobPaymentPanel, JobStatusActions, DisputesView, CustomerPaymentsPanel, SpPaymentsPanel, PlanBillingPanel, useOpenFlagsCount } from "./PaymentsAdmin";
+import { mapPaymentFields, isStripeJob, spPayFor, spPayLabel } from "./paymentsShared";
 
 // ─── CONSTANTS ───────────────────────────────────────────────────────────────
 const APPLIANCE_TYPES = ["Washing Machine","Tumble Dryer","Dishwasher","Fridge/Freezer","Oven/Cooker","Hob","Microwave"];
@@ -709,12 +709,11 @@ function JobForm({initial,onSave,onCancel,canEditRate,engineers,jobs,externalSps
 
       {canEditRate&&(
         <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:10}}>
-          <Fl label="SP Rate (£)"><input type="number" style={inp} value={f.rate} onChange={e=>set("rate",e.target.value)}/></Fl>
           <Fl label="Date Completed"><input type="date" style={inp} value={f.completedDate||""} onChange={e=>set("completedDate",e.target.value)}/></Fl>
         </div>
       )}
       <div style={{display:"flex",gap:18,marginBottom:12,flexWrap:"wrap"}}>
-        {[["partsNeeded","Parts needed"],["partsOrdered","Parts ordered"],["partsArrived","Parts arrived"],...(canEditRate?[["paid","SP paid"]]:[])] .map(([k,l])=>(
+        {[["partsNeeded","Parts needed"],["partsOrdered","Parts ordered"],["partsArrived","Parts arrived"]].map(([k,l])=>(
           <label key={k} style={{display:"flex",alignItems:"center",gap:5,fontSize:13,cursor:"pointer"}}><input type="checkbox" checked={!!f[k]} onChange={e=>set(k,e.target.checked)}/>{l}</label>
         ))}
       </div>
@@ -961,7 +960,9 @@ function JobDetail({job,onClose,onEdit,onReassign,onDelete,engineers,isOwner,onP
         </div>
         <div style={{background:"#1E2530",borderRadius:9,padding:12}}>
           <div style={{fontSize:10,color:C.light,fontWeight:700,textTransform:"uppercase",marginBottom:5}}>SP Pay</div>
-          <div style={{fontWeight:900,fontSize:18,color:job.paid?C.success:C.danger}}>{job.rate?`£${job.rate}`:"—"}<span style={{fontSize:10,marginLeft:6,fontWeight:700}}>{job.paid?"✓ PAID":"UNPAID"}</span></div>
+          {(()=>{const sp=spPayFor(job);return sp
+            ? <div style={{fontWeight:900,fontSize:18,color:sp.state==="paid"?C.success:sp.state==="owed"?C.danger:C.warn}}>£{(sp.amount/100).toFixed(2)}<span style={{fontSize:10,marginLeft:6,fontWeight:700,textTransform:"uppercase"}}>{spPayLabel(sp)}</span></div>
+            : <div style={{fontSize:12,color:C.light}}>{job.isExternal?"Set when you send the payment link":"Paid through Stripe when the customer pays"}</div>;})()}
         </div>
       </div>
 
@@ -1156,7 +1157,6 @@ function EngineerEditor({eng,onSave,onCancel,isOwner}) {
         <Fl label="Business Name"><input style={inp} value={e.businessName||""} onChange={ev=>setEng("businessName",ev.target.value)} placeholder="e.g. Hall Appliance Repairs"/></Fl>
         <Fl label="Phone"><input style={inp} value={e.phone} onChange={ev=>setEng("phone",ev.target.value)}/></Fl>
         <Fl label="Portal Login Email"><input style={inp} value={e.email} disabled/></Fl>
-        {isOwner&&<Fl label="Pay Rate (£ per job)"><input type="number" style={inp} value={e.rate} onChange={ev=>setEng("rate",Number(ev.target.value))}/></Fl>}
         <Fl label="SP Type">
           <select style={inp} value={e.type||"appliance"} onChange={ev=>setEng("type",ev.target.value)}>
             {SP_TYPES.map(t=><option key={t.key} value={t.key}>{t.label}</option>)}
@@ -1335,7 +1335,6 @@ function ExternalSpEditor({sp,onSave,onCancel,isOwner}) {
         <Fl label="Phone"><input style={inp} value={e.phone||""} onChange={ev=>setSp("phone",ev.target.value)}/></Fl>
         <Fl label="Email"><input style={inp} value={e.email||""} onChange={ev=>setSp("email",ev.target.value)}/></Fl>
         <Fl label="Company"><input style={inp} value={e.company||""} onChange={ev=>setSp("company",ev.target.value)} placeholder="e.g. sole trader / agency name"/></Fl>
-        {isOwner&&<Fl label="Pay Rate (£ per job)"><input type="number" style={inp} value={e.rate||""} onChange={ev=>setSp("rate",ev.target.value===""?null:Number(ev.target.value))}/></Fl>}
       </div>
 
       <div style={{fontWeight:800,fontSize:13,color:C.mid,marginBottom:10,paddingBottom:8,borderBottom:`1px solid ${C.border}`,textTransform:"uppercase",letterSpacing:.5}}>Postcode Areas Covered</div>
@@ -1456,7 +1455,6 @@ function AddExternalSpModal({onCreated,onCancel}) {
         <Fl label="Phone"><input style={inp} value={f.phone} onChange={e=>set("phone",e.target.value)} placeholder="07..."/></Fl>
         <Fl label="Email"><input style={inp} value={f.email} onChange={e=>set("email",e.target.value)}/></Fl>
         <Fl label="Company"><input style={inp} value={f.company} onChange={e=>set("company",e.target.value)} placeholder="e.g. sole trader / agency name"/></Fl>
-        <Fl label="Pay Rate (£ per job)"><input type="number" style={inp} value={f.rate} onChange={e=>set("rate",e.target.value)}/></Fl>
       </div>
       <div style={{display:"flex",gap:10,marginTop:10}}>
         <Btn onClick={submit} full style={{padding:"10px 0",opacity:busy?.7:1}}>{busy?"Adding…":"Add External SP"}</Btn>
@@ -1516,7 +1514,7 @@ function ExternalSpsSection({externalSps,extTab,onExtTabChange,jobs,isOwner,acce
           const total=done+ber;
           const sr=total?Math.round(done/total*100):null;
           const active=spJobs.filter(j=>!["Completed","Beyond Repair","Cancelled"].includes(j.status)).length;
-          const owed=spJobs.filter(j=>j.status==="Completed"&&!j.paid).reduce((s,j)=>s+Number(j.rate||0),0);
+          const owed=spJobs.reduce((s,j)=>{const p=spPayFor(j);return s+(p?.state==="owed"?p.amount:0);},0);
           return (
             <div key={sp.id} style={{background:C.card,borderRadius:13,boxShadow:"0 1px 3px rgba(0,0,0,.05)",overflow:"hidden"}}>
               <div style={{padding:"13px 15px",borderBottom:`1px solid ${C.border}`,display:"flex",gap:10,alignItems:"center",flexWrap:"wrap"}}>
@@ -1529,7 +1527,6 @@ function ExternalSpsSection({externalSps,extTab,onExtTabChange,jobs,isOwner,acce
                       : "No contact details"}
                   </div>
                 </div>
-                {isOwner&&sp.rate!=null&&<span style={{fontWeight:800,color:accent,fontSize:13}}>£{sp.rate}/job</span>}
                 {onText&&sp.phone&&<Btn onClick={e=>{e.stopPropagation();onText({name:sp.name,phone:sp.phone});}} variant="ghost" sm>💬 Text</Btn>}
                 <Btn onClick={()=>onEdit(sp)} variant="ghost" sm>Edit</Btn>
                 {onConvert&&<Btn onClick={()=>onConvert(sp)} variant="ghost" sm style={{color:C.primary}}>→ Make In-house</Btn>}
@@ -1555,7 +1552,7 @@ function ExternalSpsSection({externalSps,extTab,onExtTabChange,jobs,isOwner,acce
                 </div>
               </div>
 
-              {isOwner&&owed>0&&<div style={{padding:"7px 15px",background:"rgba(248,113,113,0.12)",fontSize:12,color:"#f87171",fontWeight:700}}>£{owed} owed in unpaid jobs</div>}
+              {isOwner&&owed>0&&<div style={{padding:"7px 15px",background:"rgba(248,113,113,0.12)",fontSize:12,color:"#f87171",fontWeight:700}}>£{(owed/100).toFixed(2)} owed by bank transfer (see Payments)</div>}
 
               <div style={{padding:"8px 15px"}}>
                 {spJobs.filter(j=>!["Completed","Beyond Repair","Cancelled"].includes(j.status)).slice(0,2).map(j=>(
@@ -1671,7 +1668,6 @@ function AddEngineerModal({onCreated,onCancel,defaultType}) {
         <Fl label="Business Name"><input style={spInp} value={f.businessName} onChange={e=>set("businessName",e.target.value)} placeholder="e.g. Hall Appliance Repairs"/></Fl>
         <Fl label="Phone"><input style={spInp} value={f.phone} onChange={e=>set("phone",e.target.value)} placeholder="07..."/></Fl>
         <Fl label="Email"><input style={spInp} value={f.email} onChange={e=>set("email",e.target.value)} placeholder="sp@easyrepair.co.uk"/></Fl>
-        <Fl label="Pay Rate (£ per job)"><input type="number" style={spInp} value={f.rate} onChange={e=>set("rate",e.target.value)}/></Fl>
         <div style={{gridColumn:"1 / -1"}}>
           <Fl label="SP Type">
             <select style={spInp} value={f.type} onChange={e=>set("type",e.target.value)}>
@@ -1782,7 +1778,6 @@ function ConvertExternalSpModal({sp,jobs,onDone,onCancel}) {
         <Fl label="Business Name"><input style={spInp} value={f.businessName} onChange={e=>set("businessName",e.target.value)} placeholder="e.g. Hall Appliance Repairs"/></Fl>
         <Fl label="Phone"><input style={spInp} value={f.phone} disabled={!!createdUserId} onChange={e=>set("phone",e.target.value)} placeholder="07..."/></Fl>
         <Fl label="Email"><input style={spInp} value={f.email} disabled={!!createdUserId} onChange={e=>set("email",e.target.value)} placeholder="Needed for their Portal login"/></Fl>
-        <Fl label="Pay Rate (£ per job)"><input type="number" style={spInp} value={f.rate} disabled={!!createdUserId} onChange={e=>set("rate",e.target.value)}/></Fl>
         <Fl label="SP Type">
           <select style={spInp} value={f.type} disabled={!!createdUserId} onChange={e=>set("type",e.target.value)}>
             {SP_TYPES.map(t=><option key={t.key} value={t.key}>{t.label}</option>)}
@@ -3385,8 +3380,9 @@ export default function App() {
   // Quotes are excluded -- they only count on the Quotes page, not as bookings.
   const todayNewBookings = jobs.filter(j=>j.status!=="Quote" && j.createdAt && localDateStr(new Date(j.createdAt))===TODAY);
   const unassigned = jobs.filter(j=>!j.engineerId&&!j.isExternal&&!["Cancelled","Completed","Beyond Repair","Quote"].includes(j.status));
-  const unpaidDone = jobs.filter(j=>j.status==="Completed"&&!j.paid);
-  const unpaidAmt  = unpaidDone.reduce((s,j)=>s+Number(j.rate||0),0);
+  // SP pay still owed: only ever external SPs (in-house are paid through Stripe).
+  const unpaidDone = jobs.filter(j=>spPayFor(j)?.state==="owed");
+  const unpaidAmt  = unpaidDone.reduce((s,j)=>s+spPayFor(j).amount,0);
 
   // External SP's picked from the roster (0007_external_sps.sql) group by
   // their stable externalEngineerId; a genuine one-off (never linked to a
@@ -3689,7 +3685,7 @@ export default function App() {
                 <StatCard label="Unassigned" value={unassigned.length} color={C.warn} sub="Need SP" onClick={()=>openBookingsPreset("unassigned")} title="View bookings with no SP assigned"/>
                 <StatCard label="Active Bookings" value={jobs.filter(j=>!["Cancelled","Completed","Beyond Repair","Quote"].includes(j.status)).length} color={C.blue} onClick={()=>openBookingsPreset("active")} title="View all active bookings"/>
                 <StatCard label="Open Quotes" value={quoteJobs.length} color={C.purple} onClick={()=>{setQSearch("");setView("quotes");}} title="Go to Quotes"/>
-                {isOwner&&<StatCard label="Outstanding Pay" value={`£${unpaidAmt}`} color={C.danger} sub={`${unpaidDone.length} unpaid`} onClick={()=>setView("payments")} title="Go to Payments"/>}
+                {isOwner&&<StatCard label="SP Payouts Owed" value={`£${(unpaidAmt/100).toFixed(2)}`} color={C.danger} sub={`${unpaidDone.length} external SP job${unpaidDone.length===1?"":"s"}`} onClick={()=>setView("payments")} title="Go to Payments"/>}
               </div>
               <DeclineAlerts declines={openDeclines} jobs={jobs} onOpenJob={setSelJob} onDismiss={ackDeclines}/>
               <div style={{background:C.card,borderRadius:12,boxShadow:"0 1px 3px rgba(0,0,0,.05)",overflow:"hidden",marginBottom:14}}>
@@ -3721,14 +3717,14 @@ export default function App() {
                 },
                 ...(isOwner?[{
                   key:"unpaid",
-                  label:"Awaiting Payment",
+                  label:"SP Payouts Owed",
                   items: unpaidDone.map(j=>{
                     const eng=engineers.find(e=>e.id===j.engineerId);
                     return {
                       key:j.id,
                       title:<>{j.customer} <span style={{color:C.light,fontWeight:400}}>· {j.appliance} · {j.brand||"?"}</span></>,
                       sub: j.isExternal?`${j.externalName} (External)`:eng?.name||"Unassigned",
-                      right: <span style={{fontWeight:800,color:C.danger,fontSize:12}}>£{j.rate||0}</span>,
+                      right: <span style={{fontWeight:800,color:C.danger,fontSize:12}}>£{(spPayFor(j).amount/100).toFixed(2)}</span>,
                       onClick: ()=>setSelJob(j),
                     };
                   }),
@@ -3785,7 +3781,7 @@ export default function App() {
                           style={{cursor:"pointer"}} aria-label="Select all bookings"/>
                       </th>
                     )}
-                    {["#","Customer","Appliance","Brand","Age","Scheduled","SP","Status","Callout","Pay"].map(h=>(
+                    {["#","Customer","Appliance","Brand","Age","Scheduled","SP","Status","Callout","SP Pay"].map(h=>(
                       <th key={h} style={{padding:"9px 13px",textAlign:"left",fontSize:10,fontWeight:700,color:C.light,textTransform:"uppercase",letterSpacing:.5,borderBottom:`1px solid ${C.border}`}}>{h}</th>
                     ))}
                   </tr></thead>
@@ -3807,7 +3803,7 @@ export default function App() {
                         <td style={{padding:"9px 13px",fontSize:12,color:j.isExternal?C.purple:eng?C.text:C.danger,fontWeight:j.isExternal||!eng?700:400}}>{j.isExternal?`${j.externalName} (External)`:eng?.name||"Unassigned"}</td>
                         <td style={{padding:"9px 13px"}}><Badge status={j.status}/></td>
                         <td style={{padding:"9px 13px",fontSize:12,fontWeight:800,color:C.text}} title={calloutPackageLabel(j)}>{fmtGBP(calloutFeeFor(j))}<div style={{color:C.light,fontSize:10,fontWeight:600}}>{calloutPackageLabel(j)}</div></td>
-                        <td style={{padding:"9px 13px",fontSize:12,fontWeight:800,color:j.paid?C.success:j.rate?C.danger:C.light}}>{j.rate?`£${j.rate}`:"—"}{j.paid?" ✓":""}</td>
+                        {(()=>{const sp=spPayFor(j);return <td style={{padding:"9px 13px",fontSize:12,fontWeight:800,color:!sp?C.light:sp.state==="paid"?C.success:sp.state==="owed"?C.danger:C.warn}} title={spPayLabel(sp)}>{sp?`£${(sp.amount/100).toFixed(2)}`:"—"}{sp?.state==="paid"?" ✓":""}{sp&&<div style={{color:C.light,fontSize:10,fontWeight:600}}>{spPayLabel(sp)}</div>}</td>;})()}
                       </tr>;
                     })}
                   </tbody>
@@ -4056,7 +4052,6 @@ export default function App() {
                   const total=done+ber;
                   const sr=total?Math.round(done/total*100):null;
                   const active=eJobs.filter(j=>!["Completed","Beyond Repair","Cancelled"].includes(j.status)).length;
-                  const owed=eJobs.filter(j=>j.status==="Completed"&&!j.paid).reduce((s,j)=>s+Number(j.rate||0),0);
                   const prog=engineerOnboardingProgress(eng);
 
                   // ── LIST ROW — denser single-line-per-SP alternative to the
@@ -4092,8 +4087,6 @@ export default function App() {
                         {eng.applianceTypes.length?`${eng.applianceTypes.length} appliance${eng.applianceTypes.length===1?"":"s"}`:<span style={{fontStyle:"italic"}}>No appliances set</span>}
                       </div>
 
-                      {isOwner&&<span style={{fontWeight:800,color:accent,fontSize:12,flex:"0 0 auto"}}>£{eng.rate}/job</span>}
-                      {isOwner&&owed>0&&<span style={{fontSize:11,color:"#f87171",fontWeight:700,flex:"0 0 auto"}}>£{owed} owed</span>}
 
                       <div style={{display:"flex",gap:6,flex:"0 0 auto"}} onClick={e=>e.stopPropagation()}>
                         {eng.phone&&<Btn onClick={()=>setSmsTo({name:eng.name,phone:eng.phone,engineerId:eng.id})} variant="ghost" sm>💬 Text</Btn>}
@@ -4109,7 +4102,6 @@ export default function App() {
                       <div style={{padding:"13px 15px",borderBottom:`1px solid ${C.border}`,display:"flex",gap:10,alignItems:"center",flexWrap:"wrap"}}>
                         <Av initials={eng.name.split(" ").map(w=>w[0]).join("")} color={accent}/>
                         <div style={{flex:1,minWidth:120}}><div style={{fontWeight:800,fontSize:14,display:"flex",alignItems:"center",gap:6}}>{eng.name}{eng.isTest&&<TestPill/>}</div>{eng.businessName&&<div style={{color:C.mid,fontSize:11,fontWeight:600}}>{eng.businessName}</div>}<div style={{color:C.light,fontSize:11}}><CallLink phone={eng.phone}/> · {eng.email}</div></div>
-                        {isOwner&&<span style={{fontWeight:800,color:accent,fontSize:13}}>£{eng.rate}/job</span>}
                         {eng.phone&&<Btn onClick={e=>{e.stopPropagation();setSmsTo({name:eng.name,phone:eng.phone,engineerId:eng.id});}} variant="ghost" sm>💬 Text</Btn>}
                         <Btn onClick={e=>{e.stopPropagation();setEditEng(eng);}} variant="ghost" sm>Edit</Btn>
                         <Btn onClick={e=>{e.stopPropagation();askResetPassword(eng.profileId,eng.name);}} variant="ghost" sm>Reset Password</Btn>
@@ -4151,7 +4143,6 @@ export default function App() {
                         </div>
                       </div>
 
-                      {isOwner&&owed>0&&<div style={{padding:"7px 15px",background:"rgba(248,113,113,0.12)",fontSize:12,color:"#f87171",fontWeight:700}}>£{owed} owed in unpaid jobs</div>}
 
                       {/* Recent jobs */}
                       <div style={{padding:"8px 15px"}}>
@@ -4175,74 +4166,15 @@ export default function App() {
           })()}
 
           {/* ── PAYMENTS ── */}
-          {/* Combined list: in-house SPs and one-off external SPs both render
-              through the same card template below, sorted by amount owed
-              (highest first) so it reads as one unified payments section
-              rather than two separate in-house/external groups. */}
-          {view==="payments"&&(()=>{
-            const payees = [
-              ...engineers.map(eng=>{
-                // Stripe-paid jobs pay the engineer directly, so they're not owed here.
-                const done=jobs.filter(j=>j.engineerId===eng.id&&j.status==="Completed"&&!isStripeJob(j));
-                const ber=jobs.filter(j=>j.engineerId===eng.id&&j.status==="Beyond Repair");
-                return {
-                  key:`eng-${eng.id}`, external:false,
-                  name:eng.name, initials:eng.name.split(" ").map(w=>w[0]).join(""),
-                  sub:`${done.length} completed · ${ber.length} BER`,
-                  unpaid:done.filter(j=>!j.paid), paid:done.filter(j=>j.paid),
-                };
-              }),
-              ...externalGroups.map((g,gi)=>{
-                const done=g.jobs.filter(j=>j.status==="Completed");
-                return {
-                  key:`ext-${gi}`, external:true, externalId:g.id,
-                  name:g.name, initials:g.name.split(" ").map(w=>w[0]).join("").slice(0,2),
-                  sub:[g.company,g.phone].filter(Boolean).join(" · ")||"No contact details",
-                  unpaid:done.filter(j=>!j.paid), paid:done.filter(j=>j.paid),
-                };
-              }),
-            ].sort((a,b)=>b.unpaid.reduce((s,j)=>s+Number(j.rate||0),0)-a.unpaid.reduce((s,j)=>s+Number(j.rate||0),0));
-
-            return (
+          {/* Customer payments, then SP payments (who's owed / been paid). */}
+          {view==="payments"&&(
             <div>
               <SectionTabs value={view} onChange={setView}/>
               <h1 style={{margin:"0 0 16px",fontSize:19,fontWeight:900,color:C.text}}>Payments</h1>
               <CustomerPaymentsPanel jobs={jobs} engineers={engineers} onOpenJob={setSelJob}/>
-              <h2 style={{margin:"0 0 10px",fontSize:15,fontWeight:900,color:C.text}}>SP pay</h2>
-              {payees.map(p=>(
-                <div key={p.key} style={{background:C.card,borderRadius:13,boxShadow:"0 1px 3px rgba(0,0,0,.05)",marginBottom:16,overflow:"hidden",...(p.external?{border:`1px solid ${C.purple}33`}:{})}}>
-                  <div style={{padding:"13px 18px",borderBottom:`1px solid ${C.border}`,display:"flex",justifyContent:"space-between",alignItems:"center",background:"#161B22"}}>
-                    <div style={{display:"flex",gap:10,alignItems:"center"}}>
-                      <Av initials={p.initials} color={p.external?C.purple:accent}/>
-                      <div>
-                        <div style={{fontWeight:800,fontSize:14,display:"flex",alignItems:"center",gap:6}}>{p.name}{p.external&&<span style={{background:C.purpleLight,color:C.purple,padding:"1px 7px",borderRadius:10,fontSize:9,fontWeight:800}}>EXTERNAL</span>}</div>
-                        <div style={{color:C.light,fontSize:11}}>{p.sub}</div>
-                      </div>
-                    </div>
-                    <div style={{display:"flex",alignItems:"center",gap:12}}>
-                      {p.externalId&&<Btn onClick={()=>{setSpType("external");setExtTab("active");setView("engineers");const sp=externalSps.find(x=>x.id===p.externalId);if(sp)setEditExternalSp(sp);}} variant="ghost" sm>View SP</Btn>}
-                      <div style={{textAlign:"right"}}><div style={{color:C.danger,fontWeight:900,fontSize:16}}>£{p.unpaid.reduce((s,j)=>s+Number(j.rate||0),0)} owed</div><div style={{color:C.success,fontSize:11,fontWeight:600}}>£{p.paid.reduce((s,j)=>s+Number(j.rate||0),0)} paid total</div></div>
-                    </div>
-                  </div>
-                  {p.unpaid.length===0?<div style={{padding:"11px 18px",color:C.success,fontWeight:600,fontSize:12}}>✓ All payments up to date</div>:p.unpaid.map(j=>(
-                    <div key={j.id} style={{padding:"9px 18px",borderBottom:`1px solid #262626`,display:"flex",justifyContent:"space-between",alignItems:"center"}}>
-                      <div><span style={{fontWeight:700,fontSize:13}}>{j.bookingRef||('#'+j.id)} {j.customer}</span><span style={{color:C.light,fontSize:11}}> · {j.appliance}{j.brand?` · ${j.brand}`:""} · {fmt(j.completedDate||j.scheduledDate)}</span></div>
-                      <div style={{display:"flex",gap:9,alignItems:"center"}}>
-                        <span style={{fontWeight:800,color:C.danger}}>£{j.rate}</span>
-                        {isOwner&&<Btn onClick={async ()=>{ await supabase.from("bookings").update({paid:true}).eq("id",j.id); await loadBookings(); }} variant="success" sm>Mark Paid</Btn>}
-                      </div>
-                    </div>
-                  ))}
-                  {p.paid.length>0&&<div style={{padding:"9px 18px",background:"#161B22"}}>
-                    <div style={{fontSize:9,color:C.light,fontWeight:700,textTransform:"uppercase",marginBottom:5,letterSpacing:.4}}>Payment History</div>
-                    {p.paid.map(j=><div key={j.id} style={{display:"flex",justifyContent:"space-between",fontSize:11,padding:"3px 0",color:C.mid}}><span>{j.bookingRef||('#'+j.id)} {j.customer} · {j.appliance}{j.brand?` · ${j.brand}`:""}</span><span style={{color:C.success,fontWeight:700}}>£{j.rate} ✓</span></div>)}
-                  </div>}
-                </div>
-              ))}
-              {payees.length===0&&<div style={{color:C.light,fontSize:13}}>No completed jobs yet.</div>}
+              <SpPaymentsPanel jobs={jobs} engineers={engineers} externalSps={externalSps} isOwner={isOwner} onOpenJob={setSelJob} onChanged={loadBookings}/>
             </div>
-            );
-          })()}
+          )}
 
           {view==="disputes"&&<DisputesView jobs={jobs} engineers={engineers} onOpenJob={setSelJob}/>}
 
