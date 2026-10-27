@@ -198,6 +198,31 @@ export function externalJobMoney(job) {
   };
 }
 
+// What the SP gets for a job, and whether they've had it. One rule used by
+// the Payments page, the dashboard, the bookings table and the job detail:
+//   * in-house SPs (Stripe Connect) are paid their share straight away when
+//     the customer pays, so a paid Stripe job is "paid" via Stripe;
+//   * external SPs are owed the amount set on the job's payment link until
+//     EasyRepair marks the bank transfer done ("pending" until the customer pays).
+// Returns null when there's nothing to pay the SP for this job.
+export function spPayFor(job) {
+  if (!job) return null;
+  const customerPaid = ["paid", "part_refunded", "refunded"].includes(job.paymentStatus);
+  if (job.isExternal) {
+    const amount = Number(job.spPayoutPence || 0);
+    if (!(amount > 0)) return null;
+    if (job.spPayoutStatus === "paid") return { amount, state: "paid", via: "bank", date: job.spPaidAt, ref: job.spPayoutRef || "" };
+    if (job.spPayoutStatus === "owed" || customerPaid) return { amount, state: "owed", via: "bank", date: job.paidAt };
+    return { amount, state: "pending", via: "bank" };
+  }
+  if (customerPaid && job.stripeAccountId && job.engineerSharePence != null) {
+    return { amount: Number(job.engineerSharePence), state: "paid", via: "stripe", date: job.paidAt, ref: job.stripePaymentIntentId || "" };
+  }
+  return null;
+}
+export const spPayLabel = (p) => !p ? "" : p.state === "owed" ? "Owed" : p.state === "pending" ? "Waiting for customer"
+  : p.via === "stripe" ? "Paid via Stripe" : "Paid by bank transfer";
+
 // Protection plan price for a billing interval and number of appliances.
 export function planPricePence(settings, interval, count) {
   const s = mergeSettings(settings);
