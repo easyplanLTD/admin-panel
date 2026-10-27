@@ -25,7 +25,7 @@ import {
   mergeSettings, jobMoney, penceToGBP, poundsToPence, pctLabel, planPricePence, cancellationFee,
   planCancellationFee, paymentRoute, ROUTE_LABELS, PAYMENT_STATUS_LABELS, PARTS_STATUS_LABELS,
   FEE_BEARER_LABELS, STRIPE_STATUS_LABELS, jobRef,
-  PAID_VIA_LABELS, cardLabel, stripePaymentUrl,
+  PAID_VIA_LABELS, cardLabel, stripePaymentUrl, spPayFor, spPayLabel,
 } from "./paymentsShared";
 
 // ─── data hooks ─────────────────────────────────────────────────────────────
@@ -1168,7 +1168,7 @@ export function CustomerPaymentsPanel({ jobs = [], engineers = [], onOpenJob }) 
   const cancelFees12 = jobs.filter((j) => j.cancellationFeeStatus === "charged" && in12(j.cancelledAt || j.noShowAt || j.createdAt)).reduce((s, j) => s + Number(j.cancellationFeePence || 0) - Number(j.feeEngineerSharePence || 0), 0);
   const plans12 = planPayments.filter((p) => in12(p.paid_at)).reduce((s, p) => s + Number(p.amount_pence || 0), 0);
   const turnover = commission12 + adminFees12 + cancelFees12 + plans12 + external12;
-  const spOwed = jobs.filter((j) => j.spPayoutStatus === "owed");
+  const spOwed = jobs.filter((j) => spPayFor(j)?.state === "owed");
   const threshold = Number(settings.vat_threshold_pence) || 1;
   const pct = Math.min(100, (turnover / threshold) * 100);
 
@@ -1202,7 +1202,7 @@ export function CustomerPaymentsPanel({ jobs = [], engineers = [], onOpenJob }) 
         {tile("Uncollectable", uncollectable.length, "written off or recovering", C.danger)}
         {tile("Fees to collect", fees.length, "cancellation / no-show", C.blue)}
         {tile("Commission to recover", penceToGBP(openRec.reduce((s, r) => s + r.amount_pence, 0)), `${openRec.length} open`, C.purple)}
-        {tile("SP payouts owed", penceToGBP(spOwed.reduce((s, j) => s + Number(j.spPayoutPence || 0), 0)), `${spOwed.length} external SP job${spOwed.length === 1 ? "" : "s"}`, C.primary)}
+        {tile("SP payouts owed", penceToGBP(spOwed.reduce((s, j) => s + spPayFor(j).amount, 0)), `${spOwed.length} external SP job${spOwed.length === 1 ? "" : "s"} · see SP payments below`, C.primary)}
       </div>
 
       <div style={{ background: C.card, borderRadius: 11, padding: 14, marginBottom: 12, border: `1px solid ${pct >= 90 ? C.danger : C.border}` }}>
@@ -1217,7 +1217,7 @@ export function CustomerPaymentsPanel({ jobs = [], engineers = [], onOpenJob }) 
       </div>
 
       <div style={{ display: "flex", gap: 6, marginBottom: 8, flexWrap: "wrap" }}>
-        {[["outstanding", `Outstanding (${outstanding.length})`], ["uncollectable", `Uncollectable (${uncollectable.length})`], ["fees", `Fees (${fees.length})`], ["recoveries", `Recoveries (${openRec.length})`], ["sp", `SP payouts owed (${spOwed.length})`]].map(([k, l]) => <Btn key={k} sm variant={tab === k ? "primary" : "ghost"} onClick={() => setTab(k)}>{l}</Btn>)}
+        {[["outstanding", `Outstanding (${outstanding.length})`], ["uncollectable", `Uncollectable (${uncollectable.length})`], ["fees", `Fees (${fees.length})`], ["recoveries", `Recoveries (${openRec.length})`]].map(([k, l]) => <Btn key={k} sm variant={tab === k ? "primary" : "ghost"} onClick={() => setTab(k)}>{l}</Btn>)}
       </div>
       <div style={{ background: C.card, borderRadius: 11, border: `1px solid ${C.border}`, overflow: "hidden" }}>
         {tab === "outstanding" && (outstanding.length ? outstanding.map((j) => jobLine(j, penceToGBP(jobMoney(j, settings, overrides).total))) : <div style={{ padding: 14, color: C.light, fontSize: 13 }}>Nothing outstanding.</div>)}
@@ -1238,8 +1238,126 @@ export function CustomerPaymentsPanel({ jobs = [], engineers = [], onOpenJob }) 
             </div>
           );
         }) : <div style={{ padding: 14, color: C.light, fontSize: 13 }}>No commission to recover.</div>)}
-        {tab === "sp" && (spOwed.length ? spOwed.map((j) => jobLine(j, `${penceToGBP(j.spPayoutPence)} to ${j.externalName || "SP"}${j.externalCompany ? ` (${j.externalCompany})` : ""}`)) : <div style={{ padding: 14, color: C.light, fontSize: 13 }}>No SP payouts owed. Open a job to mark its SP paid.</div>)}
       </div>
+    </div>
+  );
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+//  SP PAYMENTS (Payments page) -- one row per SP; click to see what they're
+//  owed and everything they've been paid. In-house SPs are paid through
+//  Stripe Connect automatically; only external SPs are ever owed (bank transfer).
+// ═══════════════════════════════════════════════════════════════════════════
+export function SpPaymentsPanel({ jobs = [], engineers = [], externalSps = [], isOwner, onOpenJob, onChanged }) {
+  const [open, setOpen] = useState(null);
+  const payees = useMemo(() => {
+    const withPay = (list) => list.map((j) => ({ j, p: spPayFor(j) })).filter((x) => x.p);
+    const out = engineers.map((e) => ({
+      key: `eng-${e.id}`, external: false, name: e.name || "SP", sub: e.businessName || e.phone || "",
+      items: withPay(jobs.filter((j) => !j.isExternal && j.engineerId === e.id)),
+    }));
+    // External SPs: roster ones by id, genuine one-offs by name + phone.
+    const ext = new Map();
+    for (const j of jobs.filter((x) => x.isExternal)) {
+      const k = j.externalEngineerId ? `id:${j.externalEngineerId}` : `one:${(j.externalName || "").trim().toLowerCase()}|${(j.externalPhone || "").replace(/\D/g, "")}`;
+      if (!ext.has(k)) {
+        const sp = j.externalEngineerId ? externalSps.find((s) => s.id === j.externalEngineerId) : null;
+        ext.set(k, { key: `ext-${k}`, external: true, name: sp?.name || j.externalName || "External SP", sub: [sp?.company || j.externalCompany, sp?.phone || j.externalPhone].filter(Boolean).join(" · "), jobs: [] });
+      }
+      ext.get(k).jobs.push(j);
+    }
+    for (const g of ext.values()) out.push({ ...g, items: withPay(g.jobs) });
+    for (const p of out) {
+      const sum = (st) => p.items.filter((x) => x.p.state === st).reduce((s, x) => s + x.p.amount, 0);
+      p.owed = sum("owed"); p.paid = sum("paid"); p.pending = sum("pending");
+    }
+    return out.sort((a, b) => b.owed - a.owed || b.pending - a.pending || b.paid - a.paid || a.name.localeCompare(b.name));
+  }, [jobs, engineers, externalSps]);
+
+  const totalOwed = payees.reduce((s, p) => s + p.owed, 0);
+  const initials = (n) => n.split(" ").map((w) => w[0]).join("").slice(0, 2).toUpperCase() || "?";
+  const jobText = (j) => <>{jobRef(j)} {j.customer}<span style={{ color: C.light, fontSize: 11 }}> · {j.appliance}{j.brand ? ` · ${j.brand}` : ""}</span></>;
+
+  return (
+    <div style={{ marginBottom: 22 }}>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", gap: 10, flexWrap: "wrap", marginBottom: 4 }}>
+        <h2 style={{ margin: 0, fontSize: 15, fontWeight: 900, color: C.text }}>SP payments</h2>
+        <span style={{ fontSize: 13, fontWeight: 800, color: totalOwed ? C.danger : C.success }}>{totalOwed ? `${penceToGBP(totalOwed)} owed to external SPs` : "Nothing owed"}</span>
+      </div>
+      <div style={{ fontSize: 12, color: C.mid, marginBottom: 10 }}>In-house SPs are paid their share through Stripe as soon as the customer pays. External SPs are paid by bank transfer, so mark each one paid here once you've sent it.</div>
+      <div style={{ background: C.card, borderRadius: 11, border: `1px solid ${C.border}`, overflow: "hidden" }}>
+        {payees.length === 0 && <div style={{ padding: 14, color: C.light, fontSize: 13 }}>No SPs yet.</div>}
+        {payees.map((p) => {
+          const isOpen = open === p.key;
+          const owed = p.items.filter((x) => x.p.state === "owed");
+          const pending = p.items.filter((x) => x.p.state === "pending");
+          const history = p.items.filter((x) => x.p.state === "paid").sort((a, b) => String(b.p.date || "").localeCompare(String(a.p.date || "")));
+          return (
+            <div key={p.key} style={{ borderBottom: `1px solid ${C.border}` }}>
+              <div onClick={() => setOpen(isOpen ? null : p.key)} style={{ padding: "10px 14px", display: "flex", alignItems: "center", gap: 10, cursor: "pointer", flexWrap: "wrap" }}>
+                <span style={{ width: 30, height: 30, borderRadius: "50%", background: p.external ? C.purple : C.primary, color: "#0a0a0a", fontWeight: 900, fontSize: 11, display: "inline-flex", alignItems: "center", justifyContent: "center", flex: "0 0 auto" }}>{initials(p.name)}</span>
+                <div style={{ flex: "1 1 180px", minWidth: 0 }}>
+                  <div style={{ fontWeight: 800, fontSize: 13, display: "flex", gap: 6, alignItems: "center" }}>{p.name}<Pill color={p.external ? C.purple : C.mid} bg={p.external ? C.purpleLight : undefined}>{p.external ? "External · bank transfer" : "In-house · Stripe"}</Pill></div>
+                  {p.sub && <div style={{ fontSize: 11, color: C.light }}>{p.sub}</div>}
+                </div>
+                <div style={{ textAlign: "right", fontSize: 12 }}>
+                  {p.owed > 0 && <div style={{ color: C.danger, fontWeight: 900, fontSize: 14 }}>{penceToGBP(p.owed)} owed</div>}
+                  {p.pending > 0 && <div style={{ color: C.warn, fontWeight: 700 }}>{penceToGBP(p.pending)} waiting for customer</div>}
+                  <div style={{ color: p.paid ? C.success : C.light, fontWeight: 700 }}>{p.paid ? `${penceToGBP(p.paid)} paid` : "No payments yet"}</div>
+                </div>
+                <span style={{ color: C.light, fontSize: 12, width: 12 }}>{isOpen ? "▾" : "▸"}</span>
+              </div>
+              {isOpen && (
+                <div style={{ padding: "4px 14px 14px", background: "#161B22" }}>
+                  {owed.length > 0 && <div style={{ ...label(), marginTop: 10 }}>To pay by bank transfer</div>}
+                  {owed.map(({ j, p: pay }) => <OwedPayoutRow key={j.id} job={j} pay={pay} isOwner={isOwner} jobText={jobText} onOpenJob={onOpenJob} onChanged={onChanged} />)}
+                  {pending.length > 0 && <div style={{ ...label(), marginTop: 12 }}>Waiting for the customer to pay</div>}
+                  {pending.map(({ j, p: pay }) => (
+                    <div key={j.id} onClick={() => onOpenJob?.(j)} style={{ display: "flex", justifyContent: "space-between", gap: 10, fontSize: 13, padding: "6px 0", borderBottom: `1px solid ${C.border}`, cursor: "pointer" }}>
+                      <span>{jobText(j)}</span><b style={{ color: C.warn }}>{penceToGBP(pay.amount)}</b>
+                    </div>
+                  ))}
+                  <div style={{ ...label(), marginTop: 12 }}>Payment history</div>
+                  {history.length === 0 && <div style={{ fontSize: 12, color: C.light }}>No payments yet.</div>}
+                  {history.map(({ j, p: pay }) => (
+                    <div key={j.id} onClick={() => onOpenJob?.(j)} style={{ display: "flex", justifyContent: "space-between", gap: 10, fontSize: 13, padding: "6px 0", borderBottom: `1px solid ${C.border}`, cursor: "pointer", flexWrap: "wrap" }}>
+                      <span><span style={{ color: C.mid, fontSize: 12 }}>{pay.date ? fmtDateTime(pay.date) : "—"} · </span>{jobText(j)}</span>
+                      <span style={{ textAlign: "right" }}><b style={{ color: C.success }}>{penceToGBP(pay.amount)}</b><div style={{ fontSize: 11, color: C.light }}>{spPayLabel(pay)}{pay.via === "bank" && pay.ref ? ` · ref ${pay.ref}` : ""}</div></span>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+function OwedPayoutRow({ job, pay, isOwner, jobText, onOpenJob, onChanged }) {
+  const [ref, setRef] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState("");
+  const markPaid = async () => {
+    setBusy(true); setErr("");
+    const { error } = await supabase.from("bookings").update({ sp_payout_status: "paid", sp_paid_at: new Date().toISOString(), sp_payout_ref: ref.trim() || null }).eq("id", job.id);
+    setBusy(false);
+    if (error) setErr(error.message); else await onChanged?.();
+  };
+  return (
+    <div style={{ padding: "8px 0", borderBottom: `1px solid ${C.border}` }}>
+      <div style={{ display: "flex", justifyContent: "space-between", gap: 10, alignItems: "center", flexWrap: "wrap" }}>
+        <span onClick={() => onOpenJob?.(job)} style={{ fontSize: 13, cursor: "pointer" }}>{jobText(job)}{pay.date && <span style={{ color: C.light, fontSize: 11 }}> · customer paid {fmtDateTime(pay.date)}</span>}</span>
+        <div style={{ display: "flex", gap: 6, alignItems: "center", flexWrap: "wrap" }}>
+          <b style={{ color: C.danger }}>{penceToGBP(pay.amount)}</b>
+          {isOwner && <>
+            <input style={{ ...inp, width: 170, padding: "5px 8px" }} value={ref} onChange={(e) => setRef(e.target.value)} placeholder="Transfer ref (optional)" />
+            <Btn variant="success" sm disabled={busy} onClick={markPaid}>{busy ? "Saving…" : "Mark paid"}</Btn>
+          </>}
+        </div>
+      </div>
+      <ErrorLine msg={err} />
     </div>
   );
 }
