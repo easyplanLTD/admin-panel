@@ -533,7 +533,9 @@ export function JobStatusActions({ job, onChanged }) {
         {closed && <Pill>{job.status}</Pill>}
         {autoPay && !closed && <span style={{ fontSize: 12, color: C.mid }}>{job.hasSavedCard ? "Completing charges the saved card." : "Completing creates the customer's payment link."}</span>}
       </div>
-      {!autoPay && !closed && <div style={{ fontSize: 12, color: C.light, marginTop: 8 }}>Use "Payment taken" only when the customer paid outside Stripe (for example an external SP's job).</div>}
+      {!autoPay && !closed && <div style={{ fontSize: 12, color: C.light, marginTop: 8 }}>{job.isExternal
+        ? "External SP job: send the customer a payment link below. The job closes by itself once they pay. Use \"Payment taken\" only if they paid another way."
+        : "Use \"Payment taken\" only when the customer paid outside Stripe."}</div>}
       {msg && <div style={{ fontSize: 13, marginTop: 8, color: msg.kind === "err" ? C.danger : C.success }}>{msg.text}</div>}
     </div>
   );
@@ -552,6 +554,8 @@ export function JobPaymentPanel({ job, engineers = [], isOwner, onChanged }) {
   const [busy, setBusy] = useState("");
   const [err, setErr] = useState("");
   if (!loaded) return null;
+  // External SP jobs: one-off payment link to EasyRepair's account, SP paid by bank transfer.
+  if (job.isExternal) return <ExternalJobPaymentPanel job={job} settings={settings} onChanged={onChanged} />;
 
   // Test bookings can use Stripe (test keys) before payments go live for everyone.
   const live = settings.payments_live || !!job.isTest;
@@ -611,32 +615,8 @@ export function JobPaymentPanel({ job, engineers = [], isOwner, onChanged }) {
         {job.paidAt && ` Paid ${fmtDateTime(job.paidAt)}.`}
       </div>
 
-      {/* payment record (once Stripe has confirmed the payment) */}
-      {job.stripePaymentIntentId && ["paid", "refunded", "part_refunded"].includes(job.paymentStatus) && (
-        <div style={{ marginTop: 12, padding: 10, borderRadius: 8, background: "rgba(255,255,255,0.04)", border: `1px solid ${C.border}` }}>
-          <div style={label()}>Payment record</div>
-          <Row k="Paid" v={job.paidAt ? fmtDateTime(job.paidAt) : "\u2014"} />
-          <Row k="How" v={[PAID_VIA_LABELS[job.paidVia] || "Stripe", cardLabel(job)].filter(Boolean).join(" \u00b7 ")} />
-          <Row k="Stripe reference" v={<span style={{ fontFamily: "monospace", fontSize: 12, wordBreak: "break-all" }}>{job.stripePaymentIntentId}</span>} />
-          {job.stripeLivemode === false || job.stripeLivemode == null ? <div style={{ fontSize: 11, color: C.light, marginTop: 2 }}>Test payment (Stripe sandbox)</div> : null}
-          <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginTop: 8 }}>
-            <Btn variant="ghost" sm onClick={() => navigator.clipboard?.writeText(job.stripePaymentIntentId)}>Copy reference</Btn>
-            {stripePaymentUrl(job) && <Btn variant="ghost" sm onClick={() => window.open(stripePaymentUrl(job), "_blank", "noopener")}>View in Stripe</Btn>}
-          </div>
-        </div>
-      )}
-
-      {/* customer's payment link (Pay after repair, or a declined card) */}
-      {job.paymentLinkUrl && !["paid", "refunded", "part_refunded"].includes(job.paymentStatus) && (
-        <div style={{ marginTop: 12 }}>
-          <div style={label()}>Customer's payment link</div>
-          <div style={{ fontSize: 12, color: C.mid, wordBreak: "break-all", marginBottom: 6 }}>{job.paymentLinkUrl}</div>
-          <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
-            <Btn variant="ghost" sm onClick={() => navigator.clipboard?.writeText(job.paymentLinkUrl)}>Copy link</Btn>
-            <Btn variant="ghost" sm onClick={() => window.open(job.paymentLinkUrl, "_blank", "noopener")}>Open link</Btn>
-          </div>
-        </div>
-      )}
+      <PaymentRecordBox job={job} />
+      <PaymentLinkBox job={job} />
 
       {/* parts */}
       {(job.partsLines?.length > 0 || job.partsApprovalStatus !== "none") && (
@@ -732,6 +712,191 @@ export function JobPaymentPanel({ job, engineers = [], isOwner, onChanged }) {
   );
 }
 
+// Payment record (once Stripe has confirmed the payment).
+function PaymentRecordBox({ job }) {
+  if (!job.stripePaymentIntentId || !["paid", "refunded", "part_refunded"].includes(job.paymentStatus)) return null;
+  return (
+    <div style={{ marginTop: 12, padding: 10, borderRadius: 8, background: "rgba(255,255,255,0.04)", border: `1px solid ${C.border}` }}>
+      <div style={label()}>Payment record</div>
+      <Row k="Paid" v={job.paidAt ? fmtDateTime(job.paidAt) : "—"} />
+      <Row k="How" v={[PAID_VIA_LABELS[job.paidVia] || "Stripe", cardLabel(job)].filter(Boolean).join(" · ")} />
+      <Row k="Stripe reference" v={<span style={{ fontFamily: "monospace", fontSize: 12, wordBreak: "break-all" }}>{job.stripePaymentIntentId}</span>} />
+      {job.stripeLivemode === false || job.stripeLivemode == null ? <div style={{ fontSize: 11, color: C.light, marginTop: 2 }}>Test payment (Stripe sandbox)</div> : null}
+      <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginTop: 8 }}>
+        <Btn variant="ghost" sm onClick={() => navigator.clipboard?.writeText(job.stripePaymentIntentId)}>Copy reference</Btn>
+        {stripePaymentUrl(job) && <Btn variant="ghost" sm onClick={() => window.open(stripePaymentUrl(job), "_blank", "noopener")}>View in Stripe</Btn>}
+      </div>
+    </div>
+  );
+}
+
+// Customer's payment link (Pay after repair, a declined card, or an external SP job).
+function PaymentLinkBox({ job }) {
+  if (!job.paymentLinkUrl || ["paid", "refunded", "part_refunded"].includes(job.paymentStatus)) return null;
+  return (
+    <div style={{ marginTop: 12 }}>
+      <div style={label()}>Customer's payment link</div>
+      <div style={{ fontSize: 12, color: C.mid, wordBreak: "break-all", marginBottom: 6 }}>{job.paymentLinkUrl}</div>
+      <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+        <Btn variant="ghost" sm onClick={() => navigator.clipboard?.writeText(job.paymentLinkUrl)}>Copy link</Btn>
+        <Btn variant="ghost" sm onClick={() => window.open(job.paymentLinkUrl, "_blank", "noopener")}>Open link</Btn>
+      </div>
+    </div>
+  );
+}
+
+// ─── External SP job: one-off payment link ─────────────────────────────────
+// Staff enter the call-out and parts amounts and what the SP is owed, then
+// send the customer a link to pay EasyRepair's own Stripe account (no Connect
+// split). Once paid, the SP payout shows as owed until it's marked paid here.
+const SEND_OPTIONS = [["both", "Text and email"], ["sms", "Text only"], ["email", "Email only"], ["none", "Just create the link (I'll send it)"]];
+const toPounds = (p) => (p == null ? "" : (Number(p) / 100).toFixed(2));
+
+function ExternalJobPaymentPanel({ job, settings, onChanged }) {
+  const { rows: refundReasons } = useTable("refund_reasons");
+  const paid = ["paid", "refunded", "part_refunded"].includes(job.paymentStatus);
+  const closed = CLOSED.includes(job.status);
+  const live = !!settings.payments_live || !!job.isTest;
+  const [f, setF] = useState({
+    callout: toPounds(job.extCalloutPence), parts: toPounds(job.extPartsPence),
+    partsDescription: job.extPartsDescription || "", payout: toPounds(job.spPayoutPence),
+    outcome: job.pendingOutcome === "Beyond Repair" ? "Beyond Repair" : "Completed", method: "both",
+  });
+  const [payRef, setPayRef] = useState(job.spPayoutRef || "");
+  const [busy, setBusy] = useState("");
+  const [err, setErr] = useState("");
+  const [msg, setMsg] = useState("");
+  const [modal, setModal] = useState(null);
+  const set = (k) => (v) => setF((x) => ({ ...x, [k]: v }));
+
+  const calloutP = poundsToPence(f.callout || 0), partsP = poundsToPence(f.parts || 0), payoutP = poundsToPence(f.payout || 0);
+  const draftTotal = calloutP + partsP;
+  const m = jobMoney(job, settings);
+  const hasAmounts = job.extCalloutPence != null;
+  const sp = [job.externalName, job.externalCompany].filter(Boolean).join(" · ") || "External SP";
+
+  const send = async () => {
+    setErr(""); setMsg("");
+    if (f.callout === "") { setErr("Enter the call-out fee."); return; }
+    if (draftTotal < 50) { setErr("The total must be at least £0.50."); return; }
+    if (payoutP > draftTotal) { setErr("The SP payout can't be more than the customer pays."); return; }
+    setBusy("send");
+    try {
+      const r = await callPayments("send_external_link", {
+        bookingId: job.id, calloutPence: calloutP, partsPence: partsP, partsDescription: f.partsDescription,
+        spPayoutPence: payoutP, outcome: f.outcome, method: f.method,
+      });
+      if (r?.url) navigator.clipboard?.writeText(r.url).catch?.(() => {});
+      const s = r?.sent;
+      if (r?.error) setErr(r.error);
+      else if (!s) setMsg(`Link created for ${penceToGBP(r.totalPence)} and copied to the clipboard.`);
+      else {
+        const parts = [s.sms === true && "texted", s.email === true && "emailed"].filter(Boolean).join(" and ");
+        const failed = [s.sms === false && "text", s.email === false && "email"].filter(Boolean).join(" and ");
+        setMsg(`Link for ${penceToGBP(r.totalPence)} ${parts} to the customer${failed ? ` (the ${failed} failed)` : ""}. It's also copied to the clipboard.`);
+      }
+      await onChanged?.();
+    } catch (e) { setErr(e.message); }
+    setBusy("");
+  };
+  const adminFee = async () => {
+    setBusy("fee"); setErr(""); setMsg("");
+    try { await callPayments("apply_admin_fee", { bookingId: job.id }); setMsg("Admin fee added and the link resent."); await onChanged?.(); }
+    catch (e) { setErr(e.message); }
+    setBusy("");
+  };
+  const patch = async (p) => {
+    setBusy("payout"); setErr("");
+    const { error } = await supabase.from("bookings").update(p).eq("id", job.id);
+    setBusy("");
+    if (error) setErr(error.message); else await onChanged?.();
+  };
+
+  return (
+    <div style={{ ...box(), border: `1px solid ${C.border}` }}>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 10, gap: 8, flexWrap: "wrap" }}>
+        <div style={{ fontSize: 12, fontWeight: 800, color: C.text, textTransform: "uppercase", letterSpacing: .4 }}>Customer payment · External SP</div>
+        <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+          <Pill color={C.blue} bg={C.blueLight}>Paid to EasyRepair</Pill>
+          <PayStatusPill status={job.paymentStatus} />
+          {!live && <Pill color={C.warn} bg={C.warnLight}>Payments not live</Pill>}
+        </div>
+      </div>
+      <div style={{ fontSize: 12, color: C.mid, marginBottom: 10 }}>{sp} isn't on Stripe, so the customer pays EasyRepair and you pay the SP by bank transfer.</div>
+
+      {/* amounts + send */}
+      {!paid && (
+        <div>
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(150px,1fr))", gap: 10 }}>
+            <Fl label="Call-out fee (£)">{moneyInput(f.callout, set("callout"))}</Fl>
+            <Fl label="Parts (£)">{moneyInput(f.parts, set("parts"))}</Fl>
+            <Fl label="Owed to the SP (£)">{moneyInput(f.payout, set("payout"))}</Fl>
+          </div>
+          <Fl label="Parts description (shown on the customer's checkout, optional)"><input style={inp} value={f.partsDescription} maxLength={200} onChange={(e) => set("partsDescription")(e.target.value)} placeholder="e.g. Drain pump" /></Fl>
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(200px,1fr))", gap: 10 }}>
+            {!closed && <Fl label="When paid, close the job as"><select style={inp} value={f.outcome} onChange={(e) => set("outcome")(e.target.value)}><option value="Completed">Repaired (Completed)</option><option value="Beyond Repair">Beyond repair</option></select></Fl>}
+            <Fl label="Send the link by"><select style={inp} value={f.method} onChange={(e) => set("method")(e.target.value)}>{SEND_OPTIONS.map(([k, l]) => <option key={k} value={k}>{l}</option>)}</select></Fl>
+          </div>
+          <div style={{ fontSize: 13, color: C.mid, margin: "4px 0 10px" }}>
+            Customer pays <b style={{ color: C.text }}>{penceToGBP(draftTotal)}</b>
+            {f.outcome === "Beyond Repair" && partsP > 0 && !closed ? " (parts aren't charged on a beyond-repair job)" : ""}
+            {" · "}SP {penceToGBP(payoutP)} · Stripe fee about {penceToGBP(draftTotal > 0 ? Math.round(draftTotal * 0.015) + 20 : 0)} · EasyRepair keeps about <b style={{ color: C.purple }}>{penceToGBP(draftTotal - payoutP - (draftTotal > 0 ? Math.round(draftTotal * 0.015) + 20 : 0))}</b>
+          </div>
+          <Btn sm disabled={!!busy || !live} onClick={send}>{busy === "send" ? "Sending…" : hasAmounts ? "Update amounts & resend link" : "Generate & send payment link"}</Btn>
+          {!live && <NotLiveNote />}
+        </div>
+      )}
+
+      {/* money once set */}
+      {hasAmounts && (
+        <div style={{ marginTop: 12 }}>
+          <Row k="Call-out" v={penceToGBP(m.callout)} />
+          <Row k={`Parts${job.extPartsDescription ? ` · ${job.extPartsDescription}` : ""}`} v={penceToGBP(m.partsApproved)} />
+          {m.adminFee > 0 && <Row k="Late-payment admin fee" v={penceToGBP(m.adminFee)} />}
+          <Row k={paid ? "Customer paid" : "Customer to pay"} v={penceToGBP(m.total)} strong />
+          <Row k="Owed to the SP (bank transfer)" v={penceToGBP(m.engineerNet)} color={C.primary} strong />
+          <Row k={`Stripe fee${m.feeIsEstimate ? " (estimate)" : ""} · EasyRepair pays`} v={penceToGBP(m.fee)} />
+          <Row k="EasyRepair keeps" v={penceToGBP(m.easyRepairNet)} color={C.purple} strong />
+        </div>
+      )}
+
+      <PaymentRecordBox job={job} />
+      <PaymentLinkBox job={job} />
+
+      {/* SP payout */}
+      {paid && Number(job.spPayoutPence || 0) > 0 && (
+        <div style={{ marginTop: 12, padding: 10, borderRadius: 8, background: job.spPayoutStatus === "paid" ? C.successLight : C.warnLight, border: `1px solid ${C.border}` }}>
+          <div style={label()}>SP payout · {sp}</div>
+          {job.spPayoutStatus === "paid" ? (
+            <>
+              <div style={{ fontSize: 13, color: C.success, fontWeight: 700 }}>{penceToGBP(job.spPayoutPence)} paid {job.spPaidAt ? fmtDateTime(job.spPaidAt) : ""}{job.spPayoutRef ? ` · ref ${job.spPayoutRef}` : ""}</div>
+              <Btn variant="ghost" sm style={{ marginTop: 8 }} disabled={!!busy} onClick={() => patch({ sp_payout_status: "owed", sp_paid_at: null })}>Undo</Btn>
+            </>
+          ) : (
+            <>
+              <div style={{ fontSize: 13, color: C.warn, fontWeight: 700, marginBottom: 8 }}>{penceToGBP(job.spPayoutPence)} owed to the SP</div>
+              <div style={{ display: "flex", gap: 6, flexWrap: "wrap", alignItems: "center" }}>
+                <input style={{ ...inp, maxWidth: 240 }} value={payRef} onChange={(e) => setPayRef(e.target.value)} placeholder="Bank transfer reference (optional)" />
+                <Btn variant="success" sm disabled={!!busy} onClick={() => patch({ sp_payout_status: "paid", sp_paid_at: new Date().toISOString(), sp_payout_ref: payRef.trim() || null })}>Mark SP paid</Btn>
+              </div>
+            </>
+          )}
+        </div>
+      )}
+
+      <div style={{ display: "flex", gap: 6, marginTop: 14, flexWrap: "wrap" }}>
+        {job.paymentStatus === "outstanding" && hasAmounts && !job.adminFeeAppliedAt && (
+          <Btn variant="ghost" sm disabled={!!busy || !live} onClick={adminFee}>Add £{(settings.admin_fee_pence / 100).toFixed(2)} admin fee &amp; resend link</Btn>
+        )}
+        {["paid", "part_refunded"].includes(job.paymentStatus) && <Btn variant="ghost" sm onClick={() => setModal("refund")}>Refund…</Btn>}
+      </div>
+      {msg && <div style={{ fontSize: 13, color: C.success, marginTop: 8 }}>{msg}</div>}
+      <ErrorLine msg={err} />
+      {modal === "refund" && <RefundModal job={job} money={m} reasons={refundReasons.filter((r) => r.active)} live={live} onClose={() => setModal(null)} onDone={async () => { setModal(null); await onChanged?.(); }} />}
+    </div>
+  );
+}
+
 function UncollectableModal({ job, money, reasons, onClose, onDone }) {
   const [reasonId, setReasonId] = useState("");
   const [note, setNote] = useState("");
@@ -792,7 +957,7 @@ function RefundModal({ job, money, reasons, live, onClose, onDone }) {
   const [err, setErr] = useState("");
   const reason = reasons.find((r) => r.id === reasonId);
   const refundP = poundsToPence(amount);
-  const commissionBack = reason?.commission_outcome === "refund" ? Math.round(money.commission * Math.min(1, refundP / Math.max(money.total, 1))) : 0;
+  const commissionBack = !money.external && reason?.commission_outcome === "refund" ? Math.round(money.commission * Math.min(1, refundP / Math.max(money.total, 1))) : 0;
   const save = async () => {
     if (!reason) { setErr("Choose a reason."); return; }
     if (refundP <= 0 || refundP > money.total) { setErr(`Enter an amount between £0.01 and ${penceToGBP(money.total)}.`); return; }
@@ -813,7 +978,8 @@ function RefundModal({ job, money, reasons, live, onClose, onDone }) {
     <Modal title={`Refund ${jobRef(job)}`} onClose={onClose}>
       <Fl label="Reason"><select style={inp} value={reasonId} onChange={(e) => setReasonId(e.target.value)}><option value="">Choose…</option>{reasons.map((r) => <option key={r.id} value={r.id}>{r.commission_outcome === "refund" ? "Refund commission: " : "Keep commission: "}{r.label}</option>)}</select></Fl>
       <Fl label={`Amount to refund (£, up to ${penceToGBP(money.total)})`}>{moneyInput(amount, setAmount)}</Fl>
-      {reason && <div style={{ fontSize: 13, color: C.mid, marginBottom: 10 }}>EasyRepair commission returned: <b style={{ color: C.text }}>{penceToGBP(commissionBack)}</b> of {penceToGBP(money.commission)}. The rest of the refund comes from the engineer's Stripe balance.</div>}
+      {reason && money.external && <div style={{ fontSize: 13, color: C.mid, marginBottom: 10 }}>External SP job: the whole refund comes from EasyRepair's Stripe balance. Recover any share from the SP yourself if needed.</div>}
+      {reason && !money.external && <div style={{ fontSize: 13, color: C.mid, marginBottom: 10 }}>EasyRepair commission returned: <b style={{ color: C.text }}>{penceToGBP(commissionBack)}</b> of {penceToGBP(money.commission)}. The rest of the refund comes from the engineer's Stripe balance.</div>}
       <label style={{ display: "flex", gap: 8, alignItems: "center", fontSize: 12, color: C.mid }}>
         <input type="checkbox" checked={alreadyDone} disabled={!live} onChange={(e) => setAlreadyDone(e.target.checked)} /> Just record it: the refund was already made in Stripe{!live ? " (payments aren't live yet)" : ""}
       </label>
@@ -992,12 +1158,17 @@ export function CustomerPaymentsPanel({ jobs = [], engineers = [], onOpenJob }) 
 
   const since = Date.now() - 365 * 864e5;
   const in12 = (d) => d && new Date(d).getTime() >= since;
-  const paid12 = jobs.filter((j) => ["paid", "part_refunded", "refunded"].includes(j.paymentStatus) && in12(j.paidAt));
+  const paid12All = jobs.filter((j) => ["paid", "part_refunded", "refunded"].includes(j.paymentStatus) && in12(j.paidAt));
+  // External SP jobs are paid to EasyRepair, so the whole amount is turnover (admin fee included).
+  const isExtPaid = (j) => j.isExternal && j.extCalloutPence != null;
+  const paid12 = paid12All.filter((j) => !isExtPaid(j));
+  const external12 = paid12All.filter(isExtPaid).reduce((s, j) => s + Number(j.totalPence || 0) - Number(j.refundAmountPence || 0), 0);
   const commission12 = paid12.reduce((s, j) => s + jobMoney(j, settings, overrides).commission - Number(j.commissionRefundedPence || 0), 0);
-  const adminFees12 = jobs.filter((j) => in12(j.adminFeeAppliedAt) && j.paymentStatus === "paid").reduce((s, j) => s + Math.round(Number(j.adminFeePence || 0) * (100 - Number(settings.admin_fee_engineer_share)) / 100), 0);
+  const adminFees12 = jobs.filter((j) => !isExtPaid(j) && in12(j.adminFeeAppliedAt) && j.paymentStatus === "paid").reduce((s, j) => s + Math.round(Number(j.adminFeePence || 0) * (100 - Number(settings.admin_fee_engineer_share)) / 100), 0);
   const cancelFees12 = jobs.filter((j) => j.cancellationFeeStatus === "charged" && in12(j.cancelledAt || j.noShowAt || j.createdAt)).reduce((s, j) => s + Number(j.cancellationFeePence || 0) - Number(j.feeEngineerSharePence || 0), 0);
   const plans12 = planPayments.filter((p) => in12(p.paid_at)).reduce((s, p) => s + Number(p.amount_pence || 0), 0);
-  const turnover = commission12 + adminFees12 + cancelFees12 + plans12;
+  const turnover = commission12 + adminFees12 + cancelFees12 + plans12 + external12;
+  const spOwed = jobs.filter((j) => j.spPayoutStatus === "owed");
   const threshold = Number(settings.vat_threshold_pence) || 1;
   const pct = Math.min(100, (turnover / threshold) * 100);
 
@@ -1017,7 +1188,7 @@ export function CustomerPaymentsPanel({ jobs = [], engineers = [], onOpenJob }) 
   );
   const jobLine = (j, right) => (
     <div key={j.id} onClick={() => onOpenJob?.(j)} style={{ padding: "9px 14px", borderBottom: `1px solid ${C.border}`, display: "flex", justifyContent: "space-between", alignItems: "center", cursor: "pointer", gap: 10 }}>
-      <div style={{ fontSize: 13 }}><b>{jobRef(j)} {j.customer}</b><span style={{ color: C.light, fontSize: 11 }}> · {ROUTE_LABELS[paymentRoute(j)]} · {engName(j.engineerId)}</span></div>
+      <div style={{ fontSize: 13 }}><b>{jobRef(j)} {j.customer}</b><span style={{ color: C.light, fontSize: 11 }}> · {j.isExternal ? `External SP · ${j.externalName || "SP"}` : `${ROUTE_LABELS[paymentRoute(j)]} · ${engName(j.engineerId)}`}</span></div>
       <div style={{ fontSize: 13, fontWeight: 800 }}>{right}</div>
     </div>
   );
@@ -1031,6 +1202,7 @@ export function CustomerPaymentsPanel({ jobs = [], engineers = [], onOpenJob }) 
         {tile("Uncollectable", uncollectable.length, "written off or recovering", C.danger)}
         {tile("Fees to collect", fees.length, "cancellation / no-show", C.blue)}
         {tile("Commission to recover", penceToGBP(openRec.reduce((s, r) => s + r.amount_pence, 0)), `${openRec.length} open`, C.purple)}
+        {tile("SP payouts owed", penceToGBP(spOwed.reduce((s, j) => s + Number(j.spPayoutPence || 0), 0)), `${spOwed.length} external SP job${spOwed.length === 1 ? "" : "s"}`, C.primary)}
       </div>
 
       <div style={{ background: C.card, borderRadius: 11, padding: 14, marginBottom: 12, border: `1px solid ${pct >= 90 ? C.danger : C.border}` }}>
@@ -1041,11 +1213,11 @@ export function CustomerPaymentsPanel({ jobs = [], engineers = [], onOpenJob }) 
         <div style={{ height: 8, background: "rgba(255,255,255,0.07)", borderRadius: 4, overflow: "hidden" }}>
           <div style={{ width: `${pct}%`, height: "100%", background: pct >= 90 ? C.danger : pct >= 75 ? C.warn : C.primary }} />
         </div>
-        <div style={{ fontSize: 11, color: C.light, marginTop: 6 }}>EasyRepair's own income only: commission {penceToGBP(commission12)} · protection plans {penceToGBP(plans12)} · admin fees {penceToGBP(adminFees12)} · cancellation fees {penceToGBP(cancelFees12)}. Engineers' shares aren't counted.</div>
+        <div style={{ fontSize: 11, color: C.light, marginTop: 6 }}>EasyRepair's own income: commission {penceToGBP(commission12)} · protection plans {penceToGBP(plans12)} · admin fees {penceToGBP(adminFees12)} · cancellation fees {penceToGBP(cancelFees12)} · external SP jobs (full amount, as EasyRepair is the seller) {penceToGBP(external12)}. Stripe Connect engineers' shares aren't counted.</div>
       </div>
 
       <div style={{ display: "flex", gap: 6, marginBottom: 8, flexWrap: "wrap" }}>
-        {[["outstanding", `Outstanding (${outstanding.length})`], ["uncollectable", `Uncollectable (${uncollectable.length})`], ["fees", `Fees (${fees.length})`], ["recoveries", `Recoveries (${openRec.length})`]].map(([k, l]) => <Btn key={k} sm variant={tab === k ? "primary" : "ghost"} onClick={() => setTab(k)}>{l}</Btn>)}
+        {[["outstanding", `Outstanding (${outstanding.length})`], ["uncollectable", `Uncollectable (${uncollectable.length})`], ["fees", `Fees (${fees.length})`], ["recoveries", `Recoveries (${openRec.length})`], ["sp", `SP payouts owed (${spOwed.length})`]].map(([k, l]) => <Btn key={k} sm variant={tab === k ? "primary" : "ghost"} onClick={() => setTab(k)}>{l}</Btn>)}
       </div>
       <div style={{ background: C.card, borderRadius: 11, border: `1px solid ${C.border}`, overflow: "hidden" }}>
         {tab === "outstanding" && (outstanding.length ? outstanding.map((j) => jobLine(j, penceToGBP(jobMoney(j, settings, overrides).total))) : <div style={{ padding: 14, color: C.light, fontSize: 13 }}>Nothing outstanding.</div>)}
@@ -1066,6 +1238,7 @@ export function CustomerPaymentsPanel({ jobs = [], engineers = [], onOpenJob }) 
             </div>
           );
         }) : <div style={{ padding: 14, color: C.light, fontSize: 13 }}>No commission to recover.</div>)}
+        {tab === "sp" && (spOwed.length ? spOwed.map((j) => jobLine(j, `${penceToGBP(j.spPayoutPence)} to ${j.externalName || "SP"}${j.externalCompany ? ` (${j.externalCompany})` : ""}`)) : <div style={{ padding: 14, color: C.light, fontSize: 13 }}>No SP payouts owed. Open a job to mark its SP paid.</div>)}
       </div>
     </div>
   );
