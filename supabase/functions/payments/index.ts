@@ -44,6 +44,10 @@
 //   TEST_NOTIFY_PHONE / TEST_NOTIFY_EMAIL (optional) where test bookings' texts/emails go
 //   STRIPE_PUBLISHABLE_KEY            pk_test_... / pk_live_... for the website card form
 //   CRON_SECRET     (optional)        lets a scheduler call the "daily" action
+//   STRIPE_LIVE_SECRET_KEY (optional) sk_live_/rk_live_ key used ONLY for external SP
+//                                     payment links on real bookings while the rest
+//                                     of payments is still on test keys (0023)
+//   STRIPE_LIVE_WEBHOOK_SECRET (opt.) whsec_... for the LIVE "Your account" endpoint
 
 import Stripe from "npm:stripe@17.7.0";
 import { createClient } from "npm:@supabase/supabase-js@2";
@@ -58,6 +62,11 @@ const FUNCTION_URL = `${SUPABASE_URL}/functions/v1/payments`;
 const TEST_MODE = STRIPE_KEY.startsWith("sk_test_") || STRIPE_KEY.startsWith("rk_test_");
 
 const stripe = new Stripe(STRIPE_KEY, { httpClient: Stripe.createFetchHttpClient() });
+// External SP links can go live before everything else (migration 0023):
+// a separate live key, used only for those links on real bookings.
+const STRIPE_LIVE_KEY = Deno.env.get("STRIPE_LIVE_SECRET_KEY") || "";
+const stripeLive = TEST_MODE && /^(sk|rk)_live_/.test(STRIPE_LIVE_KEY)
+  ? new Stripe(STRIPE_LIVE_KEY, { httpClient: Stripe.createFetchHttpClient() }) : null;
 const cryptoProvider = Stripe.createSubtleCryptoProvider();
 const db = createClient(SUPABASE_URL, SERVICE_ROLE_KEY, { auth: { autoRefreshToken: false, persistSession: false } });
 
@@ -335,6 +344,20 @@ function requireLive(s: any, c: Caller, b?: any) {
   if (TEST_MODE && (isStaff(c) || b?.is_test)) return;
   fail("Payments aren't live yet. Turn them on in Settings → Payments → VAT & go live.");
 }
+// External SP links: test bookings follow the normal test-mode rules; real
+// bookings need payments live, or "external SP links live" plus the live key.
+function externalLinksLive(s: any) {
+  return !!s.payments_live || (!!s.external_links_live && (!TEST_MODE || !!stripeLive));
+}
+function requireExternalLive(s: any, c: Caller, b: any) {
+  if (b?.is_test) return requireLive(s, c, b);
+  if (externalLinksLive(s)) return;
+  if (s.external_links_live && TEST_MODE && !stripeLive) fail("External SP links are switched on, but the STRIPE_LIVE_SECRET_KEY secret isn't set in Supabase yet.");
+  fail("External SP payment links aren't live yet. Turn them on in Settings → Payments → VAT & go live.");
+}
+// Which Stripe account an external SP job is charged on.
+const externalClient = (b: any) => (stripeLive && !b?.is_test ? stripeLive : stripe);
+const clientForLivemode = (livemode: boolean) => (stripeLive && livemode ? stripeLive : stripe);
 
 // ---------------------------------------------------------------- engineers
 
@@ -764,7 +787,7 @@ async function applyAdminFee(c: Caller, body: any) {
   requireStaff(c);
   const s = await settings();
   const b = await booking(body.bookingId);
-  requireLive(s, c, b);
+  if (isExternalPayable(b)) requireExternalLive(s, c, b); else requireLive(s, c, b);
   if (b.admin_fee_applied_at) fail("The admin fee has already been added.");
   if (b.payment_timing !== "after" && !isExternalPayable(b)) fail("The admin fee only applies to Pay after repair bookings and external SP payment links.");
   if (b.payment_status === "paid") fail("This job has already been paid.");
@@ -784,7 +807,7 @@ async function sendExternalLink(c: Caller, body: any) {
   requireStaff(c);
   const s = await settings();
   const b = await booking(body.bookingId);
-  requireLive(s, c, b);
+  requireExternalLive(s, c, b);
   if (!b.is_external) fail("This isn't an external SP job.");
   if (b.status === "Cancelled") fail("This job is cancelled.");
   if (["paid", "processing", "refunded", "part_refunded"].includes(b.payment_status)) fail("This job has already been paid.");
@@ -941,16 +964,17 @@ async function refund(c: Caller, body: any) {
   requireStaff(c);
   const s = await settings();
   const b = await booking(body.bookingId);
-  requireLive(s, c, b);
   // External SP jobs were paid to EasyRepair's own account (no connected account).
   const onPlatform = !!b.is_external && !b.stripe_charge_account_id;
+  if (onPlatform) requireExternalLive(s, c, b); else requireLive(s, c, b);
   if (!b.stripe_payment_intent_id || (!b.stripe_charge_account_id && !onPlatform)) fail("This job wasn't paid through Stripe, so record the refund instead.");
   const total = Number(b.total_pence || 0);
   const amount = Math.round(Number(body.amountPence));
   const already = Number(b.refund_amount_pence || 0);
   if (!(amount > 0) || amount + already > total) fail(`Refund must be between £0.01 and ${gbp(total - already)}.`);
   const refundCommission = !onPlatform && !!body.refundCommission;
-  await stripe.refunds.create({
+  const refundClient = onPlatform ? clientForLivemode(b.stripe_livemode === true) : stripe;
+  await refundClient.refunds.create({
     payment_intent: b.stripe_payment_intent_id, amount,
     ...(onPlatform ? {} : { refund_application_fee: refundCommission }),
     metadata: { booking_id: b.id, refund_reason_id: body.refundReasonId || "", by: "easyrepair" },
@@ -1074,17 +1098,22 @@ async function daily(c: Caller) {
   requireStaff(c);
   const s = await settings();
   const out: Record<string, number> = { adminFees: 0, reminders: 0, renewed: 0, invoiced: 0 };
-  if (!s.payments_live) return { skipped: "payments not live" };
+  // Before full go-live, only external SP links (if they're live) get the admin fee.
+  const externalOnly = !s.payments_live;
+  if (externalOnly && !externalLinksLive(s)) return { skipped: "payments not live" };
   const today = new Date().toISOString().slice(0, 10);
 
   // Pay after repair jobs, and external SP jobs with a payment link (0022).
-  const { data: unpaid } = await db.from("bookings").select("*")
-    .or("payment_timing.eq.after,and(is_external.eq.true,ext_callout_pence.not.is.null)")
+  let unpaidQ = db.from("bookings").select("*")
+    .or(externalOnly ? "and(is_external.eq.true,ext_callout_pence.not.is.null)" : "payment_timing.eq.after,and(is_external.eq.true,ext_callout_pence.not.is.null)")
     .eq("payment_status", "outstanding")
     .is("admin_fee_applied_at", null).lt("awaiting_payment_since", `${today}T00:00:00Z`);
+  if (externalOnly) unpaidQ = unpaidQ.eq("is_test", false);
+  const { data: unpaid } = await unpaidQ;
   for (const b of unpaid || []) {
     try { await applyAdminFee(c, { bookingId: b.id }); out.adminFees++; } catch (_) { /* keep going */ }
   }
+  if (externalOnly) { console.log("daily run (external links only)", JSON.stringify(out)); return out; }
 
   const now = new Date();
   const remindBy = addDays(now, Number(s.plan_renewal_reminder_days || 30)).toISOString();
@@ -1140,17 +1169,17 @@ async function daily(c: Caller) {
 // ------------------------------------------------------------------ webhooks
 
 // EasyRepair's own Stripe account ID (differs between the sandbox and live).
-let platformAccountId: string | null = null;
-async function platformAccount() {
-  if (!platformAccountId) platformAccountId = (await stripe.accounts.retrieve()).id;
-  return platformAccountId;
+const platformAccountIds = new Map<Stripe, string>();
+async function platformAccount(client: Stripe = stripe) {
+  if (!platformAccountIds.has(client)) platformAccountIds.set(client, (await client.accounts.retrieve()).id);
+  return platformAccountIds.get(client)!;
 }
 // Link that opens this payment in EasyRepair's Stripe dashboard (it lives on
 // the engineer's connected account).
 // account is null for external SP jobs, which are paid to EasyRepair's own account.
 async function dashboardUrl(pi: Stripe.PaymentIntent, account: string | null) {
   try {
-    const platform = await platformAccount();
+    const platform = await platformAccount(account ? stripe : clientForLivemode(!!pi.livemode));
     const mode = pi.livemode ? "" : "test/";
     return account
       ? `https://dashboard.stripe.com/${platform}/${mode}connect/accounts/${account}/payments/${pi.id}`
@@ -1167,7 +1196,8 @@ async function markJobPaid(pi: Stripe.PaymentIntent, account: string | null) {
 
   // Actual Stripe fee for this charge (paid from the engineer's account, or
   // EasyRepair's own for an external SP job).
-  const charge = await stripe.charges.retrieve(pi.latest_charge as string, { expand: ["balance_transaction"] }, account ? { stripeAccount: account } : undefined);
+  const chargeClient = account ? stripe : clientForLivemode(!!pi.livemode);
+  const charge = await chargeClient.charges.retrieve(pi.latest_charge as string, { expand: ["balance_transaction"] }, account ? { stripeAccount: account } : undefined);
   const bt = charge.balance_transaction as Stripe.BalanceTransaction | null;
   // On a direct charge the engineer's balance transaction "fee" is Stripe's fee
   // PLUS EasyRepair's application fee (commission). Only Stripe's own part
@@ -1305,7 +1335,7 @@ async function handleEvent(ev: Stripe.Event) {
 async function webhook(req: Request) {
   const sig = req.headers.get("Stripe-Signature")!;
   const raw = await req.text();
-  const secrets = [Deno.env.get("STRIPE_WEBHOOK_SECRET"), Deno.env.get("STRIPE_CONNECT_WEBHOOK_SECRET")].filter(Boolean) as string[];
+  const secrets = [Deno.env.get("STRIPE_WEBHOOK_SECRET"), Deno.env.get("STRIPE_CONNECT_WEBHOOK_SECRET"), Deno.env.get("STRIPE_LIVE_WEBHOOK_SECRET")].filter(Boolean) as string[];
   let ev: Stripe.Event | null = null;
   for (const sec of secrets) {
     try { ev = await stripe.webhooks.constructEventAsync(raw, sig, sec, undefined, cryptoProvider); break; } catch (_) { /* try next */ }
@@ -1384,7 +1414,10 @@ async function externalCheckout(b: any) {
   if (m.callout > 0) items.push({ quantity: 1, price_data: { currency: "gbp", unit_amount: m.callout, product_data: { name: `Call-out and labour — ${b.appliance || "appliance"} repair (${ref(b)})` } } });
   if (m.parts > 0) items.push({ quantity: 1, price_data: { currency: "gbp", unit_amount: m.parts, product_data: { name: b.ext_parts_description ? `Parts: ${b.ext_parts_description}` : "Parts" } } });
   if (m.adminFee > 0) items.push({ quantity: 1, price_data: { currency: "gbp", unit_amount: m.adminFee, product_data: { name: "Late payment admin fee" } } });
-  const session = await stripe.checkout.sessions.create({
+  // Real bookings go to the live account once external links are live.
+  const s = await settings();
+  if (!b.is_test && !externalLinksLive(s)) return donePage("unavailable", b);
+  const session = await externalClient(b).checkout.sessions.create({
     mode: "payment",
     line_items: items,
     customer_email: b.email && !b.is_test ? b.email : undefined,
