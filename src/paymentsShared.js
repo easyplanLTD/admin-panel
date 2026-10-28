@@ -10,6 +10,7 @@
 
 export const DEFAULT_PAYMENT_SETTINGS = {
   payments_live: false,
+  external_links_live: false,
   callout_protection_pence: 7999,
   callout_repair_only_pence: 9999,
   engineer_callout_share: 62.51,
