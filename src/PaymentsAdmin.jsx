@@ -445,7 +445,7 @@ export function ReasonListManager({ table, title, help, tag, tagOptions }) {
 }
 
 function VatGoLiveForm({ settings, onSaved }) {
-  const fields = [["vat_registered", "bool"], ["vat_rate", "num"], ["vat_threshold_pence", "pence"], ["payments_live", "bool"]];
+  const fields = [["vat_registered", "bool"], ["vat_rate", "num"], ["vat_threshold_pence", "pence"], ["payments_live", "bool"], ["external_links_live", "bool"]];
   const { form, set, save, busy, msg, err } = useSettingsForm(settings, fields, onSaved);
   return (
     <div>
@@ -466,6 +466,13 @@ function VatGoLiveForm({ settings, onSaved }) {
           <input type="checkbox" checked={!!form.payments_live} onChange={(e) => set("payments_live", e.target.checked)} /> Payments are live (switches on charging, payment links, refunds and engineer Stripe setup)
         </label>
         <div style={{ fontSize: 12, color: C.warn, marginTop: 8 }}>Only switch this on once the Stripe account, Connect and the payments Edge Function are set up and tested in test mode.</div>
+      </div>
+      <div style={{ ...box(), border: `1px solid ${form.external_links_live || form.payments_live ? C.success : C.border}55` }}>
+        <div style={label()}>External SP payment links</div>
+        <label style={{ display: "flex", gap: 8, alignItems: "center", fontSize: 13 }}>
+          <input type="checkbox" checked={!!form.external_links_live || !!form.payments_live} disabled={!!form.payments_live} onChange={(e) => set("external_links_live", e.target.checked)} /> External SP payment links take real payments
+        </label>
+        <div style={{ fontSize: 12, color: C.mid, marginTop: 8 }}>Lets one-off links for external SP jobs charge customers on EasyRepair's live Stripe account now, while everything else stays in test mode. Test bookings still use Stripe test mode. Needs the STRIPE_LIVE_SECRET_KEY secret in Supabase. Already on when payments are live.</div>
       </div>
       <Btn onClick={() => save()}>{busy ? "Saving…" : "Save"}</Btn>
       {msg && <div style={{ color: C.success, fontSize: 12, marginTop: 8 }}>{msg}</div>}
@@ -756,7 +763,7 @@ function ExternalJobPaymentPanel({ job, settings, onChanged }) {
   const { rows: refundReasons } = useTable("refund_reasons");
   const paid = ["paid", "refunded", "part_refunded"].includes(job.paymentStatus);
   const closed = CLOSED.includes(job.status);
-  const live = !!settings.payments_live || !!job.isTest;
+  const live = !!settings.payments_live || !!settings.external_links_live || !!job.isTest;
   const [f, setF] = useState({
     callout: toPounds(job.extCalloutPence), parts: toPounds(job.extPartsPence),
     partsDescription: job.extPartsDescription || "", payout: toPounds(job.spPayoutPence),
