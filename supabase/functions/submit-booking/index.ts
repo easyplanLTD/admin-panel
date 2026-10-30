@@ -114,6 +114,8 @@ async function sendAdminNewBookingEmail(b) {
     row('Address', esc([b.address, b.postcode].filter(Boolean).join(', '))),
     row('Appliance', esc(b.appliance) + (b.brand ? ' (' + esc(b.brand) + ')' : '')),
     row('Appliance age', esc(b.applianceAge)),
+    ...(b.fuelType ? [row('Gas or electric', esc(b.fuelType) + (needsGasSafe(b.fuelType) ? ' <b>(Gas Safe engineer required)</b>' : ''))] : []),
+    ...(b.installationType ? [row('Built-in / freestanding', esc(b.installationType))] : []),
     row('Issue', esc(b.problem || 'Not specified')),
     row('Preferred visit date and time', esc(b.preferredCallTime)),
     row('Package', b.protectionPlan ? 'Repair + Protection Plan' : 'Repair only'),
@@ -180,6 +182,25 @@ function isOnboardingComplete(eng) {
   );
 }
 
+// ─── fuel / installation type ──────────────────────────────────────────────
+// Asked on the website form: fuel type for Oven, Hob and Cooker; built-in vs
+// freestanding for everything except Hob. Anything outside these lists is
+// dropped rather than stored, so the columns stay clean for filtering.
+const FUEL_TYPES = ["Gas", "Electric", "Induction", "Dual fuel", "Not sure"];
+const INSTALLATION_TYPES = ["Built-in", "Freestanding", "Not sure"];
+function cleanChoice(v, allowed) {
+  if (typeof v !== "string") return null;
+  const hit = allowed.find((a) => a.toLowerCase() === v.trim().toLowerCase());
+  return hit || null;
+}
+// Gas work legally needs a Gas Safe registered engineer. "Not sure" is
+// treated as gas too, so an unknown fuel type never lands on someone who
+// isn't registered. Keep in sync with needsGasSafe() in decline-booking and
+// in fixflow/src/App.jsx.
+function needsGasSafe(fuelType) {
+  return fuelType === "Gas" || fuelType === "Dual fuel" || fuelType === "Not sure";
+}
+
 // ─── assignment algorithm -- ported from autoAssign() in fixflow/src/App.jsx ──
 // Keep this in sync with that function. Differences from the client version:
 // it takes engineers/existing-bookings straight from the database instead of
@@ -207,6 +228,7 @@ function pickEngineer(bookingInput, engineers, activeCounts) {
     if (!(eng.appliance_types || []).includes(bookingInput.appliance)) return false;
     const excl = (eng.brand_exclusions || {})[bookingInput.appliance] || [];
     if (bookingInput.brand && excl.includes(bookingInput.brand)) return false;
+    if (needsGasSafe(bookingInput.fuelType) && !eng.gas_safe) return false;
     return true;
   });
 
@@ -266,6 +288,8 @@ Deno.serve(async (req) => {
     appliance, brand, applianceAge, problem, preferredCallTime,
       sourceUrl, referrerUrl, paymentTiming,
   } = body || {};
+  const fuelType = cleanChoice(body?.fuelType, FUEL_TYPES);
+  const installationType = cleanChoice(body?.installationType, INSTALLATION_TYPES);
   // Test bookings from the website (form opened with ?erpay=test) are marked
   // is_test, only go to test engineers, and never message real contact details.
   const isTest = body?.test === true;
@@ -280,7 +304,7 @@ Deno.serve(async (req) => {
 
   const { data: engineers, error: engErr } = await admin
     .from("engineers")
-    .select("id, postcodes, appliance_types, brand_exclusions, active, stats_completed, stats_ber, working_hours, id_document_path, insurance_document_path, insurance_expiry_date, profile:profiles(archived_at, must_change_password, terms_accepted_at, name, phone, is_test)");
+    .select("id, postcodes, appliance_types, brand_exclusions, active, stats_completed, stats_ber, working_hours, id_document_path, insurance_document_path, insurance_expiry_date, gas_safe, profile:profiles(archived_at, must_change_password, terms_accepted_at, name, phone, is_test)");
   if (engErr) return json({ error: "Could not look up engineers" }, 500);
 
   const { data: activeBookings, error: bookingsErr } = await admin
@@ -295,7 +319,7 @@ Deno.serve(async (req) => {
     activeCounts.set(b.engineer_id, (activeCounts.get(b.engineer_id) || 0) + 1);
   }
 
-  const bookingInput = { postcode, appliance, brand };
+  const bookingInput = { postcode, appliance, brand, fuelType };
   // Real bookings never go to test engineers, and test bookings only go to them.
   const pool = (engineers || []).filter((e) => !!e.profile?.is_test === isTest);
   const match = pickEngineer(bookingInput, pool, activeCounts);
@@ -314,6 +338,8 @@ Deno.serve(async (req) => {
         ? AGE_RANGE_TO_YEARS[applianceAge] : null,
       appliance_age_label: applianceAge || null, // original range text as selected on the form, e.g. "1-3 years"
       issue: problem || null,
+      fuel_type: fuelType,
+      installation_type: installationType,
       preferred_call_time: preferredCallTime || null,
       source: "Website",
       source_url: sourceUrl || null,
@@ -368,6 +394,7 @@ Deno.serve(async (req) => {
     const adminRes = await sendAdminNewBookingEmail({
       name, phone, email, postcode, address, appliance, brand,
       applianceAge, problem, preferredCallTime, sourceUrl, protectionPlan,
+      fuelType, installationType,
       bookingRef: inserted.booking_ref || ("#" + inserted.id),
       engineerName: match?.profile?.name || null,
       engineerPhone: match?.profile?.phone || null,
