@@ -49,6 +49,19 @@ function needsGasSafe(fuelType) {
   return fuelType === "Gas" || fuelType === "Dual fuel" || fuelType === "Not sure";
 }
 
+// Bookings made before the 30 Oct 2026 appliance split were stored as
+// "Oven/Cooker"; they still match engineers who do Oven or Cooker.
+const LEGACY_APPLIANCE = { "Oven/Cooker": ["Oven", "Cooker", "Oven/Cooker"] };
+function handlesAppliance(eng, appliance) {
+  const types = eng.appliance_types || [];
+  return (LEGACY_APPLIANCE[appliance] || [appliance]).some((a) => types.includes(a));
+}
+function brandExcluded(eng, appliance, brand) {
+  if (!brand) return false;
+  const excl = eng.brand_exclusions || {};
+  return (LEGACY_APPLIANCE[appliance] || [appliance]).some((a) => (excl[a] || []).includes(brand));
+}
+
 // Mirrors autoAssign() in admin/src/App.jsx -- keep the two in sync if that
 // scoring logic changes.
 function pickReplacement(booking, engineers) {
@@ -64,9 +77,8 @@ function pickReplacement(booking, engineers) {
       return pc === up || pc.startsWith(up) || pcAlpha === up;
     });
     if (!covers) return false;
-    if (!(eng.appliance_types || []).includes(booking.appliance)) return false;
-    const excl = (eng.brand_exclusions || {})[booking.appliance] || [];
-    if (booking.brand && excl.includes(booking.brand)) return false;
+    if (!handlesAppliance(eng, booking.appliance)) return false;
+    if (brandExcluded(eng, booking.appliance, booking.brand)) return false;
     if (needsGasSafe(booking.fuel_type) && !eng.gas_safe) return false;
     return true;
   });
