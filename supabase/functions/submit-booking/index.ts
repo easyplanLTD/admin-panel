@@ -201,6 +201,19 @@ function needsGasSafe(fuelType) {
   return fuelType === "Gas" || fuelType === "Dual fuel" || fuelType === "Not sure";
 }
 
+// Bookings made before the 30 Oct 2026 appliance split were stored as
+// "Oven/Cooker"; they still match engineers who do Oven or Cooker.
+const LEGACY_APPLIANCE = { "Oven/Cooker": ["Oven", "Cooker", "Oven/Cooker"] };
+function handlesAppliance(eng, appliance) {
+  const types = eng.appliance_types || [];
+  return (LEGACY_APPLIANCE[appliance] || [appliance]).some((a) => types.includes(a));
+}
+function brandExcluded(eng, appliance, brand) {
+  if (!brand) return false;
+  const excl = eng.brand_exclusions || {};
+  return (LEGACY_APPLIANCE[appliance] || [appliance]).some((a) => (excl[a] || []).includes(brand));
+}
+
 // ─── assignment algorithm -- ported from autoAssign() in fixflow/src/App.jsx ──
 // Keep this in sync with that function. Differences from the client version:
 // it takes engineers/existing-bookings straight from the database instead of
@@ -225,9 +238,8 @@ function pickEngineer(bookingInput, engineers, activeCounts) {
       return pc === up || pc.startsWith(up) || pcAlpha === up;
     });
     if (!covers) return false;
-    if (!(eng.appliance_types || []).includes(bookingInput.appliance)) return false;
-    const excl = (eng.brand_exclusions || {})[bookingInput.appliance] || [];
-    if (bookingInput.brand && excl.includes(bookingInput.brand)) return false;
+    if (!handlesAppliance(eng, bookingInput.appliance)) return false;
+    if (brandExcluded(eng, bookingInput.appliance, bookingInput.brand)) return false;
     if (needsGasSafe(bookingInput.fuelType) && !eng.gas_safe) return false;
     return true;
   });
