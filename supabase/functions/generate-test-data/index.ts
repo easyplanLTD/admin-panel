@@ -63,7 +63,7 @@ const INTERVAL_MS = {
 
 const FIRST_NAMES = ["Alex","Sam","Jordan","Taylor","Casey","Morgan","Riley","Jamie","Charlie","Drew","Robin","Frankie"];
 const LAST_NAMES = ["Test","Sample","Example","Demo","Placeholder","Fixture","Trial","Mock"];
-const APPLIANCE_TYPES = ["Washing Machine","Tumble Dryer","Dishwasher","Fridge/Freezer","Oven/Cooker","Hob","Microwave"];
+const APPLIANCE_TYPES = ["Washing Machine","Dishwasher","Tumble Dryer","Fridge/Freezer","Freezer","Microwave","Oven","Hob","Cooker"];
 const BRANDS = ["Bosch","Samsung","LG","Hotpoint","Beko","AEG","Indesit","Siemens"];
 const ISSUES = [
 "Not turning on", "Making a loud noise", "Leaking water", "Not heating",
