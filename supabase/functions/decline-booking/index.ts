@@ -43,6 +43,12 @@ function json(body, status = 200) {
   });
 }
 
+// Gas work legally needs a Gas Safe registered engineer -- keep in sync with
+// needsGasSafe() in submit-booking and fixflow/src/App.jsx.
+function needsGasSafe(fuelType) {
+  return fuelType === "Gas" || fuelType === "Dual fuel" || fuelType === "Not sure";
+}
+
 // Mirrors autoAssign() in admin/src/App.jsx -- keep the two in sync if that
 // scoring logic changes.
 function pickReplacement(booking, engineers) {
@@ -61,6 +67,7 @@ function pickReplacement(booking, engineers) {
     if (!(eng.appliance_types || []).includes(booking.appliance)) return false;
     const excl = (eng.brand_exclusions || {})[booking.appliance] || [];
     if (booking.brand && excl.includes(booking.brand)) return false;
+    if (needsGasSafe(booking.fuel_type) && !eng.gas_safe) return false;
     return true;
   });
 
