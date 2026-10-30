@@ -158,6 +158,14 @@ function inviteOrRecoveryType(){
 // below. Nothing left in this file reads from local demo arrays.
 
 // ─── AUTO-ASSIGN ─────────────────────────────────────────────────────────────
+// Fuel / installation type, asked on the website booking form (0024).
+const FUEL_TYPES = ["Gas","Electric","Induction","Dual fuel","Not sure"];
+const INSTALLATION_TYPES = ["Built-in","Freestanding","Not sure"];
+// Gas work legally needs a Gas Safe registered engineer. "Not sure" counts as
+// gas so an unknown fuel type never lands on someone who isn't registered.
+// Keep in sync with needsGasSafe() in the submit-booking and decline-booking
+// Edge Functions.
+const needsGasSafe = (fuelType) => fuelType==="Gas"||fuelType==="Dual fuel"||fuelType==="Not sure";
 function autoAssign(job, engineers, jobs) {
   const pc = (job.postcode || "").toUpperCase().trim();
   const pcAlpha = pc.replace(/[0-9\s]+$/, "");
@@ -171,6 +179,7 @@ function autoAssign(job, engineers, jobs) {
     if (!eng.applianceTypes.includes(job.appliance)) return false;
     const excl = eng.brandExclusions[job.appliance] || [];
     if (job.brand && excl.includes(job.brand)) return false;
+    if (needsGasSafe(job.fuelType) && !eng.gasSafe) return false;
     return true;
   });
 
@@ -712,7 +721,7 @@ function SetPasswordScreen({onDone}) {
 
 // ─── JOB FORM ─────────────────────────────────────────────────────────────────
 function JobForm({initial,onSave,onCancel,canEditRate,engineers,jobs,externalSps=[],defaultStatus="Booked",authorName=""}) {
-  const blank = {customer:"",phone:"",email:"",address:"",postcode:"",appliance:APPLIANCE_TYPES[0],brand:"",applianceAge:"",issue:"",source:SOURCES[0],status:defaultStatus,engineerId:null,scheduledDate:"",scheduledTime:"09:00",completedDate:"",priority:"Normal",partsNeeded:false,partsOrdered:false,partsArrived:false,rate:"",paid:false,notes:"",isExternal:false,externalEngineerId:null,externalName:"",externalPhone:"",externalEmail:"",externalCompany:"",wantsProtectionPlan:false,calloutFee:""};
+  const blank = {customer:"",phone:"",email:"",address:"",postcode:"",appliance:APPLIANCE_TYPES[0],brand:"",applianceAge:"",issue:"",fuelType:"",installationType:"",source:SOURCES[0],status:defaultStatus,engineerId:null,scheduledDate:"",scheduledTime:"09:00",completedDate:"",priority:"Normal",partsNeeded:false,partsOrdered:false,partsArrived:false,rate:"",paid:false,notes:"",isExternal:false,externalEngineerId:null,externalName:"",externalPhone:"",externalEmail:"",externalCompany:"",wantsProtectionPlan:false,calloutFee:""};
   const [f,setF] = useState(initial?{...initial,rate:initial.rate??"",calloutFee:initial.calloutFee??""}:blank);
   const [calloutErr,setCalloutErr] = useState("");
   const [newNote,setNewNote] = useState("");
@@ -778,6 +787,10 @@ function JobForm({initial,onSave,onCancel,canEditRate,engineers,jobs,externalSps
         <Fl label="Appliance Age (years)"><input type="number" min="0" max="30" style={inp} value={f.applianceAge} onChange={e=>set("applianceAge",e.target.value)} placeholder="e.g. 5"/></Fl>
         <Fl label="Priority"><select style={inp} value={f.priority} onChange={e=>set("priority",e.target.value)}><option>Normal</option><option>High</option><option>Urgent</option></select></Fl>
         <Fl label="Status"><select style={inp} value={f.status} onChange={e=>set("status",e.target.value)}>{STATUSES.map(s=><option key={s}>{s}</option>)}</select></Fl>
+      </div>
+      <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:10}}>
+        <Fl label="Gas / Electric"><select style={inp} value={f.fuelType||""} onChange={e=>set("fuelType",e.target.value)}><option value="">— Not asked —</option>{FUEL_TYPES.map(t=><option key={t}>{t}</option>)}</select></Fl>
+        <Fl label="Built-in / Freestanding"><select style={inp} value={f.installationType||""} onChange={e=>set("installationType",e.target.value)}><option value="">— Not asked —</option>{INSTALLATION_TYPES.map(t=><option key={t}>{t}</option>)}</select></Fl>
       </div>
       <Fl label="Fault Description"><textarea style={ta} value={f.issue} onChange={e=>set("issue",e.target.value)} placeholder="Describe the fault in detail..."/></Fl>
       <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:10}}>
@@ -1052,7 +1065,7 @@ function JobDetail({job,onClose,onEdit,onReassign,onDelete,engineers,isOwner,onP
 
       {/* Appliance banner */}
       <div style={{background:C.primaryLight,border:`1px solid #BFDBFE`,borderRadius:9,padding:"10px 16px",marginBottom:14,display:"flex",gap:24,flexWrap:"wrap",alignItems:"center"}}>
-        {[["Appliance",job.appliance],["Brand",job.brand||"Unknown"],["Age",job.applianceAgeLabel?job.applianceAgeLabel:(job.applianceAge===""||job.applianceAge==null)?"Unknown":`${job.applianceAge} yr${job.applianceAge!=1?"s":""}`],["Callout Fee",`${fmtGBP(calloutFeeFor(job))} · ${calloutPackageLabel(job)}`],["Booked",fmtDateTime(job.createdAt)],["Source",job.source]].map(([l,v])=>(
+        {[["Appliance",job.appliance],["Brand",job.brand||"Unknown"],...(job.fuelType?[["Gas / Electric",job.fuelType+(needsGasSafe(job.fuelType)?" 🔥":"")]]:[]),...(job.installationType?[["Installation",job.installationType]]:[]),["Age",job.applianceAgeLabel?job.applianceAgeLabel:(job.applianceAge===""||job.applianceAge==null)?"Unknown":`${job.applianceAge} yr${job.applianceAge!=1?"s":""}`],["Callout Fee",`${fmtGBP(calloutFeeFor(job))} · ${calloutPackageLabel(job)}`],["Booked",fmtDateTime(job.createdAt)],["Source",job.source]].map(([l,v])=>(
           <div key={l}><div style={{fontSize:10,color:C.light,fontWeight:700,textTransform:"uppercase"}}>{l}</div><div style={{fontWeight:700,fontSize:14,color:C.text}}>{v}</div></div>
         ))}
       </div>
@@ -1191,14 +1204,16 @@ function ReassignModal({job,engineers,jobs,externalSps=[],onReassign,onClose}) {
         </div>
       ) : (
         <>
-          {suggested&&<div style={{background:C.successLight,border:`1px solid #A7F3D0`,borderRadius:8,padding:"10px 14px",marginBottom:14,fontSize:13,fontWeight:600,color:C.success}}>⚡ Auto-suggestion: <strong>{suggested.name}</strong> — best match for postcode, appliance &amp; brand</div>}
+          {suggested&&<div style={{background:C.successLight,border:`1px solid #A7F3D0`,borderRadius:8,padding:"10px 14px",marginBottom:14,fontSize:13,fontWeight:600,color:C.success}}>⚡ Auto-suggestion: <strong>{suggested.name}</strong> — best match for postcode, appliance &amp; brand{needsGasSafe(job.fuelType)?" (Gas Safe only)":""}</div>}
+          {needsGasSafe(job.fuelType)&&<div style={{background:C.dangerLight,border:`1px solid ${C.danger}`,borderRadius:8,padding:"8px 12px",marginBottom:14,fontSize:12,fontWeight:600,color:C.danger}}>🔥 {job.fuelType==="Not sure"?"Customer isn't sure if this is gas":"Gas appliance"} — only assign a Gas Safe registered SP.</div>}
           <div style={{display:"grid",gridTemplateColumns:"repeat(3,1fr)",gap:10,marginBottom:14}}>
             {engineers.map(e=>{
               const pc=(job.postcode||"").toUpperCase(); const pcA=pc.replace(/[0-9\s]+$/,"");
               const covers=e.postcodes.some(p=>{const up=p.toUpperCase();return pc===up||pc.startsWith(up)||pcA===up;});
               const handles=e.applianceTypes.includes(job.appliance);
               const excl=(e.brandExclusions[job.appliance]||[]).includes(job.brand);
-              const ok=covers&&handles&&!excl;
+              const gasBlocked=needsGasSafe(job.fuelType)&&!e.gasSafe;
+              const ok=covers&&handles&&!excl&&!gasBlocked;
               const done=jobs.filter(j=>j.engineerId===e.id&&j.status==="Completed").length;
               const ber=jobs.filter(j=>j.engineerId===e.id&&j.status==="Beyond Repair").length;
               return (
@@ -1207,7 +1222,8 @@ function ReassignModal({job,engineers,jobs,externalSps=[],onReassign,onClose}) {
                   <div style={{fontSize:11,color:C.success}}>✅ {done} repaired</div>
                   <div style={{fontSize:11,color:C.danger}}>🔴 {ber} BER</div>
                   <div style={{fontSize:11,color:C.mid}}>Success: {pct(done,done+ber)}</div>
-                  {!ok&&<div style={{fontSize:10,color:C.warn,marginTop:4,fontWeight:700}}>⚠ Outside criteria</div>}
+                  {gasBlocked&&<div style={{fontSize:10,color:C.danger,marginTop:4,fontWeight:700}}>⛔ Not Gas Safe registered</div>}
+                  {!ok&&!gasBlocked&&<div style={{fontSize:10,color:C.warn,marginTop:4,fontWeight:700}}>⚠ Outside criteria</div>}
                 </div>
               );
             })}
@@ -1312,6 +1328,15 @@ function EngineerEditor({eng,onSave,onCancel,isOwner}) {
         <input style={{...inp,maxWidth:130}} value={newPc} onChange={ev=>setNewPc(ev.target.value)} placeholder="e.g. M1 or LS" onKeyDown={ev=>ev.key==="Enter"&&addPc()}/>
         <Btn onClick={addPc} sm>+ Add</Btn>
       </div>
+
+      <div style={{fontWeight:800,fontSize:13,color:C.mid,marginBottom:10,paddingBottom:8,borderBottom:`1px solid ${C.border}`,textTransform:"uppercase",letterSpacing:.5}}>Gas Safe Registration</div>
+      <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:10,alignItems:"end",marginBottom:6}}>
+        <label style={{display:"flex",alignItems:"center",gap:8,cursor:"pointer",fontSize:13,fontWeight:700,color:e.gasSafe?C.text:C.light,paddingBottom:10}}>
+          <input type="checkbox" checked={!!e.gasSafe} onChange={()=>setEng("gasSafe",!e.gasSafe)}/> Gas Safe registered
+        </label>
+        <Fl label="Gas Safe number (optional)"><input style={inp} value={e.gasSafeNumber||""} onChange={ev=>setEng("gasSafeNumber",ev.target.value)} placeholder="e.g. 123456"/></Fl>
+      </div>
+      <div style={{fontSize:11,color:C.light,marginBottom:20}}>Gas cookers, ovens and hobs (and any where the customer isn't sure) are only auto-assigned to Gas Safe registered SPs. Only the office can change this.</div>
 
       <div style={{fontWeight:800,fontSize:13,color:C.mid,marginBottom:10,paddingBottom:8,borderBottom:`1px solid ${C.border}`,textTransform:"uppercase",letterSpacing:.5}}>Appliance Types &amp; Brand Exclusions</div>
       <div style={{fontSize:11,color:C.light,marginBottom:12}}>Tick the appliance types this SP handles. For each active type, click any brands they <strong>won't</strong> repair (highlighted in red).</div>
@@ -2109,6 +2134,8 @@ function mapEngineerRow(row){
     type: row.type||"appliance",
     rate: row.pay_rate, postcodes: row.postcodes||[], applianceTypes: row.appliance_types||[],
     brandExclusions: row.brand_exclusions||{}, selfServiceEnabled: row.self_service_enabled,
+    // Office-only (0024 guard trigger stops SPs changing it from the Portal).
+    gasSafe: !!row.gas_safe, gasSafeNumber: row.gas_safe_number||"",
     stats: { repairs: row.stats_completed, beyondRepair: row.stats_ber },
     workingHours: row.working_hours||{},
     idDocumentPath: row.id_document_path||null, idDocumentUploadedAt: row.id_document_uploaded_at||null,
@@ -2175,6 +2202,9 @@ function mapBookingRow(row){
     address: row.address||"", postcode: row.postcode||"",
     appliance: row.appliance, brand: row.brand||"", applianceAge: row.appliance_age??"", applianceAgeLabel: row.appliance_age_label||null,
     issue: row.issue||"", preferredCallTime: row.preferred_call_time||"",
+    // Asked on the website form (0024): fuel type for Oven/Hob/Cooker, built-in
+    // vs freestanding for everything else. Gas/Dual fuel/Not sure = Gas Safe only.
+    fuelType: row.fuel_type||"", installationType: row.installation_type||"",
     source: row.source||"Website", sourceUrl: row.source_url||"", referrerUrl: row.referrer_url||"", status: row.status, engineerId: row.engineer_id,
     // When this came in (existing column, already used to order both the
     // Bookings and Quotes lists) -- shown as "Requested" on the Quotes page
@@ -2228,6 +2258,7 @@ function bookingFieldsToRow(form){
     appliance: form.appliance, brand: form.brand||null,
     appliance_age: form.applianceAge===""||form.applianceAge==null?null:Number(form.applianceAge),
     issue: form.issue||null, source: form.source||"Website", status: form.status,
+    fuel_type: form.fuelType||null, installation_type: form.installationType||null,
     engineer_id: form.isExternal?null:(form.engineerId||null),
     scheduled_date: form.scheduledDate||null, scheduled_time: form.scheduledTime||null,
     completed_date: form.completedDate||null, priority: form.priority||"Normal",
@@ -3658,6 +3689,7 @@ export default function App() {
       pay_rate:engData.rate, type:engData.type||"appliance", postcodes:engData.postcodes, appliance_types:engData.applianceTypes,
       brand_exclusions:engData.brandExclusions, self_service_enabled:true,
       working_hours:engData.workingHours, insurance_expiry_date:engData.insuranceExpiryDate||null,
+      gas_safe:!!engData.gasSafe, gas_safe_number:(engData.gasSafeNumber||"").trim()||null,
     }).eq("id",engData.id);
     await loadEngineers();
     setEditEng(null);
@@ -3842,7 +3874,7 @@ export default function App() {
                   return <div key={j.id} onClick={()=>setSelJob(j)} style={{padding:"10px 17px",borderBottom:`1px solid #262626`,cursor:"pointer",display:"flex",alignItems:"center",gap:12}} onMouseOver={e=>e.currentTarget.style.background="#1E2530"} onMouseOut={e=>e.currentTarget.style.background="transparent"}>
                     <div style={{fontWeight:800,color:C.primary,fontSize:12,minWidth:42}}>{slotLabel(j.scheduledTime)}</div>
                     <div style={{flex:1}}>
-                      <div style={{fontWeight:700,fontSize:13}}>{j.customer} <span style={{color:C.light,fontWeight:400}}>· {j.appliance} · {j.brand||"?"}{j.applianceAgeLabel?` · ${j.applianceAgeLabel}`:(j.applianceAge===""||j.applianceAge==null)?"":` · ${j.applianceAge}yr`}</span></div>
+                      <div style={{fontWeight:700,fontSize:13}}>{j.customer} <span style={{color:C.light,fontWeight:400}}>· {j.appliance} · {j.brand||"?"}{j.fuelType?` · ${j.fuelType}`:""}{j.installationType?` · ${j.installationType}`:""}{j.applianceAgeLabel?` · ${j.applianceAgeLabel}`:(j.applianceAge===""||j.applianceAge==null)?"":` · ${j.applianceAge}yr`}</span></div>
                       <div style={{color:C.mid,fontSize:11}}>{j.address}</div>
                     </div>
                     <div style={{fontSize:11,color:C.mid}}>{j.isExternal?<>{j.externalName} <span style={{color:C.purple,fontWeight:700}}>(External)</span></>:eng?.name||<span style={{color:C.danger,fontWeight:700}}>Unassigned</span>}</div>
