@@ -4,12 +4,24 @@ import { PaymentsSettings, JobPaymentPanel, JobStatusActions, DisputesView, Cust
 import { mapPaymentFields, isStripeJob, spPayFor, spPayLabel } from "./paymentsShared";
 
 // ─── CONSTANTS ───────────────────────────────────────────────────────────────
-const APPLIANCE_TYPES = ["Washing Machine","Tumble Dryer","Dishwasher","Fridge/Freezer","Oven/Cooker","Hob","Microwave"];
+// Same names and order as the website booking form (split 30 Oct 2026: Oven,
+// Hob and Cooker are separate, Freezer is separate from Fridge/Freezer).
+// Engineers tick these as skills; bookings are matched on an exact name.
+const APPLIANCE_TYPES = ["Washing Machine","Dishwasher","Tumble Dryer","Fridge/Freezer","Freezer","Microwave","Oven","Hob","Cooker"];
+// Booking-only choices: "Other" from the website, plus the pre-split
+// "Oven/Cooker" so older bookings still show and save correctly.
+const BOOKING_APPLIANCE_TYPES = [...APPLIANCE_TYPES,"Other"];
+const LEGACY_APPLIANCE = {"Oven/Cooker":["Oven","Cooker","Oven/Cooker"]};
+const engHandles = (eng,appliance) => (LEGACY_APPLIANCE[appliance]||[appliance]).some(a=>(eng.applianceTypes||[]).includes(a));
+const engExcludesBrand = (eng,appliance,brand) => !!brand && (LEGACY_APPLIANCE[appliance]||[appliance]).some(a=>((eng.brandExclusions||{})[a]||[]).includes(brand));
 const BRANDS = {
   "Washing Machine":["AEG","Beko","Bosch","Candy","Hoover","Hotpoint","Indesit","LG","Miele","Samsung","Siemens","Whirlpool","Zanussi","Other"],
   "Tumble Dryer":   ["AEG","Beko","Bosch","Candy","Hoover","Hotpoint","Indesit","LG","Miele","Samsung","Siemens","Whirlpool","Zanussi","Other"],
   "Dishwasher":     ["AEG","Beko","Bosch","Candy","Hoover","Hotpoint","Indesit","LG","Miele","Samsung","Siemens","Whirlpool","Zanussi","Other"],
   "Fridge/Freezer": ["AEG","Beko","Bosch","Candy","Haier","Hotpoint","Indesit","LG","Miele","Samsung","Siemens","Whirlpool","Zanussi","Other"],
+  "Freezer":        ["AEG","Beko","Bosch","Candy","Haier","Hotpoint","Indesit","LG","Miele","Samsung","Siemens","Whirlpool","Zanussi","Other"],
+  "Oven":           ["AEG","Beko","Bosch","Candy","Hotpoint","Indesit","Neff","Samsung","Siemens","Smeg","Zanussi","Other"],
+  "Cooker":         ["AEG","Beko","Belling","Bosch","Candy","Hotpoint","Indesit","Leisure","Neff","Rangemaster","Smeg","Stoves","Zanussi","Other"],
   "Oven/Cooker":    ["AEG","Beko","Bosch","Candy","Hotpoint","Indesit","Neff","Rangemaster","Samsung","Siemens","Smeg","Other"],
   "Hob":            ["AEG","Beko","Bosch","Candy","Hotpoint","Indesit","Neff","Siemens","Smeg","Other"],
   "Microwave":      ["Bosch","Hotpoint","LG","Panasonic","Samsung","Sharp","Siemens","Other"],
@@ -176,9 +188,8 @@ function autoAssign(job, engineers, jobs) {
       return pc === up || pc.startsWith(up) || pcAlpha === up;
     });
     if (!covers) return false;
-    if (!eng.applianceTypes.includes(job.appliance)) return false;
-    const excl = eng.brandExclusions[job.appliance] || [];
-    if (job.brand && excl.includes(job.brand)) return false;
+    if (!engHandles(eng, job.appliance)) return false;
+    if (engExcludesBrand(eng, job.appliance, job.brand)) return false;
     if (needsGasSafe(job.fuelType) && !eng.gasSafe) return false;
     return true;
   });
@@ -780,7 +791,7 @@ function JobForm({initial,onSave,onCancel,canEditRate,engineers,jobs,externalSps
       <Fl label="Full Address (inc. postcode)"><input style={inp} value={f.address} onChange={e=>set("address",e.target.value)} placeholder="Street, City, Postcode"/></Fl>
       <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr",gap:10}}>
         <Fl label="Postcode area (for matching)"><input style={inp} value={f.postcode} onChange={e=>set("postcode",e.target.value.toUpperCase())} placeholder="e.g. M1 or LS2"/></Fl>
-        <Fl label="Appliance Type"><select style={inp} value={f.appliance} onChange={e=>{set("appliance",e.target.value);set("brand","");}}>{APPLIANCE_TYPES.map(a=><option key={a}>{a}</option>)}</select></Fl>
+        <Fl label="Appliance Type"><select style={inp} value={f.appliance} onChange={e=>{set("appliance",e.target.value);set("brand","");}}>{(BOOKING_APPLIANCE_TYPES.includes(f.appliance)?BOOKING_APPLIANCE_TYPES:[...BOOKING_APPLIANCE_TYPES,f.appliance]).map(a=><option key={a}>{a}</option>)}</select></Fl>
         <Fl label="Brand"><select style={inp} value={f.brand} onChange={e=>set("brand",e.target.value)}><option value="">— Select —</option>{brandList.map(b=><option key={b}>{b}</option>)}</select></Fl>
       </div>
       <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr",gap:10}}>
@@ -1210,8 +1221,8 @@ function ReassignModal({job,engineers,jobs,externalSps=[],onReassign,onClose}) {
             {engineers.map(e=>{
               const pc=(job.postcode||"").toUpperCase(); const pcA=pc.replace(/[0-9\s]+$/,"");
               const covers=e.postcodes.some(p=>{const up=p.toUpperCase();return pc===up||pc.startsWith(up)||pcA===up;});
-              const handles=e.applianceTypes.includes(job.appliance);
-              const excl=(e.brandExclusions[job.appliance]||[]).includes(job.brand);
+              const handles=engHandles(e,job.appliance);
+              const excl=engExcludesBrand(e,job.appliance,job.brand);
               const gasBlocked=needsGasSafe(job.fuelType)&&!e.gasSafe;
               const ok=covers&&handles&&!excl&&!gasBlocked;
               const done=jobs.filter(j=>j.engineerId===e.id&&j.status==="Completed").length;
