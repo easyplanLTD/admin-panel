@@ -764,25 +764,31 @@ function ExternalJobPaymentPanel({ job, settings, onChanged }) {
   const paid = ["paid", "refunded", "part_refunded"].includes(job.paymentStatus);
   const closed = CLOSED.includes(job.status);
   const live = !!settings.payments_live || !!settings.external_links_live || !!job.isTest;
-  const [f, setF] = useState({
-    // Pre-fill from the callout fee set on the booking (phone bookings) until a link has gone out.
-    callout: job.extCalloutPence != null ? toPounds(job.extCalloutPence) : (job.calloutFee != null && job.calloutFee !== "" ? Number(job.calloutFee).toFixed(2) : ""), parts: toPounds(job.extPartsPence),
-    partsDescription: job.extPartsDescription || "", payout: toPounds(job.spPayoutPence),
-    outcome: job.pendingOutcome === "Beyond Repair" ? "Beyond Repair" : "Completed", method: "both",
-  });
-  const [payRef, setPayRef] = useState(job.spPayoutRef || "");
-  const [busy, setBusy] = useState("");
-  const [err, setErr] = useState("");
-  const [msg, setMsg] = useState("");
-  const [modal, setModal] = useState(null);
   // "Owed to the SP" = the SP's callout charge (copied onto the job when they
   // were assigned) plus any parts, kept in step as parts / outcome change until
   // staff type their own amount. Parts aren't charged on a beyond-repair job,
   // so they're not added to the SP's payout then either. Off once a link has
   // gone out, since sp_payout_pence then already includes the parts.
   const chargeP = job.extCalloutPence == null && job.spPayoutPence != null ? Number(job.spPayoutPence) : null;
-  const [autoPayout, setAutoPayout] = useState(chargeP != null);
   const autoFor = (x) => toPounds(chargeP + (x.outcome === "Beyond Repair" && !closed ? 0 : poundsToPence(x.parts || 0)));
+  const [f, setF] = useState(() => {
+    const init = {
+      // Pre-fill from the callout fee set on the booking (phone bookings) until a link has gone out.
+      callout: job.extCalloutPence != null ? toPounds(job.extCalloutPence) : (job.calloutFee != null && job.calloutFee !== "" ? Number(job.calloutFee).toFixed(2) : ""),
+      // Parts saved before the link goes out (agreed with the customer by phone) pre-fill too.
+      parts: toPounds(job.extPartsPence),
+      partsDescription: job.extPartsDescription || "", payout: toPounds(job.spPayoutPence),
+      outcome: job.pendingOutcome === "Beyond Repair" ? "Beyond Repair" : "Completed", method: "both",
+    };
+    if (chargeP != null) init.payout = autoFor(init);
+    return init;
+  });
+  const [payRef, setPayRef] = useState(job.spPayoutRef || "");
+  const [busy, setBusy] = useState("");
+  const [err, setErr] = useState("");
+  const [msg, setMsg] = useState("");
+  const [modal, setModal] = useState(null);
+  const [autoPayout, setAutoPayout] = useState(chargeP != null);
   const set = (k) => (v) => {
     if (k === "payout") setAutoPayout(false);
     setF((x) => {
@@ -828,6 +834,27 @@ function ExternalJobPaymentPanel({ job, settings, onChanged }) {
     catch (e) { setErr(e.message); }
     setBusy("");
   };
+  // Parts agreed with the customer over the phone, saved before any payment is
+  // taken. Only ext_parts_pence / ext_parts_description are written (never
+  // ext_callout_pence, which is what marks the link as sent), plus a record of
+  // the customer's agreement. The amounts pre-fill the link when it's sent.
+  const partsSavedP = job.extCalloutPence == null ? (job.extPartsPence ?? null) : null;
+  const partsChanged = partsP !== Number(job.extPartsPence || 0) || (f.partsDescription || "").trim() !== (job.extPartsDescription || "");
+  const saveParts = async () => {
+    setErr(""); setMsg("");
+    if (f.parts !== "" && !(Number(f.parts) >= 0)) { setErr("Enter a valid parts amount."); return; }
+    const desc = (f.partsDescription || "").trim().slice(0, 200);
+    if (partsP > 0 && !desc) { setErr("Add a short parts description, so the customer sees what they agreed to on their checkout."); return; }
+    setBusy("parts");
+    const now = new Date().toISOString();
+    const { error } = await supabase.from("bookings").update(partsP > 0
+      ? { ext_parts_pence: partsP, ext_parts_description: desc, parts_approval_status: "approved", parts_approved_at: now, parts_approval_method: "Agreed with the customer by phone (external SP job)" }
+      : { ext_parts_pence: null, ext_parts_description: null, parts_approval_status: "none", parts_approved_at: null, parts_approval_method: null }).eq("id", job.id);
+    setBusy("");
+    if (error) { setErr(error.message); return; }
+    setMsg(partsP > 0 ? `Parts saved: ${penceToGBP(partsP)} (${desc}), agreed with the customer. They'll be included when you send the payment link.` : "Parts cleared.");
+    await onChanged?.();
+  };
   const patch = async (p) => {
     setBusy("payout"); setErr("");
     const { error } = await supabase.from("bookings").update(p).eq("id", job.id);
@@ -862,7 +889,19 @@ function ExternalJobPaymentPanel({ job, settings, onChanged }) {
                 : <>Owed to the SP set by hand. <button type="button" onClick={() => { setAutoPayout(true); setF((x) => ({ ...x, payout: autoFor(x) })); }} style={{ background: "none", border: "none", padding: 0, color: C.primary, cursor: "pointer", fontSize: 11, fontFamily: "inherit", textDecoration: "underline" }}>Reset to callout charge + parts</button></>}
             </div>
           )}
-          <Fl label="Parts description (shown on the customer's checkout, optional)"><input style={inp} value={f.partsDescription} maxLength={200} onChange={(e) => set("partsDescription")(e.target.value)} placeholder="e.g. Drain pump" /></Fl>
+          <Fl label="Parts description (shown on the customer's checkout)"><input style={inp} value={f.partsDescription} maxLength={200} onChange={(e) => set("partsDescription")(e.target.value)} placeholder="e.g. Drain pump" /></Fl>
+          {!hasAmounts && (
+            <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap", margin: "-2px 0 12px" }}>
+              <Btn variant="ghost" sm disabled={!!busy || !partsChanged} onClick={saveParts}>{busy === "parts" ? "Saving…" : partsP > 0 ? "Save parts (customer agreed)" : "Save parts"}</Btn>
+              <span style={{ fontSize: 11, color: partsChanged ? C.warn : C.mid }}>
+                {partsChanged
+                  ? "Unsaved parts. Save them once the customer has agreed, before taking payment."
+                  : partsSavedP
+                    ? <>Parts saved {penceToGBP(partsSavedP)}{job.extPartsDescription ? ` · ${job.extPartsDescription}` : ""}{job.partsApprovedAt ? ` · agreed with the customer ${fmtDateTime(job.partsApprovedAt)}` : ""}.</>
+                    : "When the SP calls with the parts needed and the customer agrees, enter them here and save."}
+              </span>
+            </div>
+          )}
           <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(200px,1fr))", gap: 10 }}>
             {!closed && <Fl label="When paid, close the job as"><select style={inp} value={f.outcome} onChange={(e) => set("outcome")(e.target.value)}><option value="Completed">Repaired (Completed)</option><option value="Beyond Repair">Beyond repair</option></select></Fl>}
             <Fl label="Send the link by"><select style={inp} value={f.method} onChange={(e) => set("method")(e.target.value)}>{SEND_OPTIONS.map(([k, l]) => <option key={k} value={k}>{l}</option>)}</select></Fl>
