@@ -144,11 +144,13 @@ export const isExternalPayable = (b: any) => !!b?.is_external && b.ext_callout_p
 export function externalCharge(b: any) {
   const callout = Number(b.ext_callout_pence || 0);
   const parts = b.pending_outcome === "Beyond Repair" ? 0 : Number(b.ext_parts_pence || 0);
+  // Additional labour the SP charged (0026). Still charged on a beyond-repair job: the work was done.
+  const labour = Number(b.ext_labour_pence || 0);
   const adminFee = b.admin_fee_applied_at ? Number(b.admin_fee_pence || 0) : 0;
-  const total = callout + parts + adminFee;
+  const total = callout + parts + labour + adminFee;
   const engineerShare = Math.min(total, Number(b.sp_payout_pence || 0));
   const terms = { engineer_callout_share: 0, engineer_parts_share: 0, fee_bearer: "easyrepair" };
-  return { terms, callout, parts, adminFee, total, engineerShare, commission: total - engineerShare };
+  return { terms, callout, parts, labour, adminFee, total, engineerShare, commission: total - engineerShare };
 }
 
 // What to charge for a job right now: callout + approved parts + admin fee.
@@ -819,9 +821,10 @@ async function sendExternalLink(c: Caller, body: any) {
   };
   const callout = pence(body.calloutPence, "call-out fee", true);
   const parts = pence(body.partsPence, "parts amount");
+  const labour = pence(body.labourPence, "labour amount");
   const payout = pence(body.spPayoutPence, "amount owed to the SP");
-  if (callout + parts < 50) fail("The total must be at least £0.50 (Stripe's minimum).");
-  if (payout > callout + parts) fail("The SP payout can't be more than the customer pays.");
+  if (callout + parts + labour < 50) fail("The total must be at least £0.50 (Stripe's minimum).");
+  if (payout > callout + parts + labour) fail("The SP payout can't be more than the customer pays.");
   const outcome = body.outcome === "Beyond Repair" ? "Beyond Repair" : "Completed";
   const closed = ["Completed", "Beyond Repair"].includes(b.status);
 
@@ -829,6 +832,8 @@ async function sendExternalLink(c: Caller, body: any) {
   const patch: Record<string, unknown> = {
     ext_callout_pence: callout, ext_parts_pence: parts,
     ext_parts_description: String(body.partsDescription || "").trim().slice(0, 200) || null,
+    ext_labour_pence: labour || null,
+    ext_labour_description: labour ? (String(body.labourDescription || "").trim().slice(0, 200) || null) : null,
     sp_payout_pence: payout,
     payment_link_url: url, payment_status: "outstanding",
     awaiting_payment_since: b.awaiting_payment_since || new Date().toISOString(),
@@ -1411,7 +1416,8 @@ async function externalCheckout(b: any) {
   const m = externalCharge(b);
   if (m.total < 50) return donePage("unavailable", b);
   const items: any[] = [];
-  if (m.callout > 0) items.push({ quantity: 1, price_data: { currency: "gbp", unit_amount: m.callout, product_data: { name: `Call-out and labour — ${b.appliance || "appliance"} repair (${ref(b)})` } } });
+  if (m.callout > 0) items.push({ quantity: 1, price_data: { currency: "gbp", unit_amount: m.callout, product_data: { name: `${m.labour > 0 ? "Call-out" : "Call-out and labour"} — ${b.appliance || "appliance"} repair (${ref(b)})` } } });
+  if (m.labour > 0) items.push({ quantity: 1, price_data: { currency: "gbp", unit_amount: m.labour, product_data: { name: b.ext_labour_description ? `Additional labour: ${b.ext_labour_description}` : "Additional labour" } } });
   if (m.parts > 0) items.push({ quantity: 1, price_data: { currency: "gbp", unit_amount: m.parts, product_data: { name: b.ext_parts_description ? `Parts: ${b.ext_parts_description}` : "Parts" } } });
   if (m.adminFee > 0) items.push({ quantity: 1, price_data: { currency: "gbp", unit_amount: m.adminFee, product_data: { name: "Late payment admin fee" } } });
   // Real bookings go to the live account once external links are live.
