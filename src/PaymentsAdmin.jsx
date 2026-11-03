@@ -770,7 +770,7 @@ function ExternalJobPaymentPanel({ job, settings, onChanged }) {
   // so they're not added to the SP's payout then either. Off once a link has
   // gone out, since sp_payout_pence then already includes the parts.
   const chargeP = job.extCalloutPence == null && job.spPayoutPence != null ? Number(job.spPayoutPence) : null;
-  const autoFor = (x) => toPounds(chargeP + (x.outcome === "Beyond Repair" && !closed ? 0 : poundsToPence(x.parts || 0)));
+  const autoFor = (x) => toPounds(chargeP + (x.outcome === "Beyond Repair" && !closed ? 0 : poundsToPence(x.parts || 0)) + poundsToPence(x.labour || 0));
   const [f, setF] = useState(() => {
     const init = {
       // Pre-fill from the callout fee set on the booking (phone bookings) until a link has gone out.
@@ -778,6 +778,8 @@ function ExternalJobPaymentPanel({ job, settings, onChanged }) {
       // Parts saved before the link goes out (agreed with the customer by phone) pre-fill too.
       parts: toPounds(job.extPartsPence),
       partsDescription: job.extPartsDescription || "", payout: toPounds(job.spPayoutPence),
+      // Additional labour the SP charged on top of the call-out (0026).
+      labour: toPounds(job.extLabourPence), labourDescription: job.extLabourDescription || "",
       outcome: job.pendingOutcome === "Beyond Repair" ? "Beyond Repair" : "Completed", method: "both",
     };
     if (chargeP != null) init.payout = autoFor(init);
@@ -793,13 +795,13 @@ function ExternalJobPaymentPanel({ job, settings, onChanged }) {
     if (k === "payout") setAutoPayout(false);
     setF((x) => {
       const n = { ...x, [k]: v };
-      if (autoPayout && chargeP != null && k !== "payout" && (k === "parts" || k === "outcome")) n.payout = autoFor(n);
+      if (autoPayout && chargeP != null && k !== "payout" && (k === "parts" || k === "labour" || k === "outcome")) n.payout = autoFor(n);
       return n;
     });
   };
 
-  const calloutP = poundsToPence(f.callout || 0), partsP = poundsToPence(f.parts || 0), payoutP = poundsToPence(f.payout || 0);
-  const draftTotal = calloutP + partsP;
+  const calloutP = poundsToPence(f.callout || 0), partsP = poundsToPence(f.parts || 0), labourP = poundsToPence(f.labour || 0), payoutP = poundsToPence(f.payout || 0);
+  const draftTotal = calloutP + partsP + labourP;
   const m = jobMoney(job, settings);
   const hasAmounts = job.extCalloutPence != null;
   const sp = [job.externalName, job.externalCompany].filter(Boolean).join(" · ") || "External SP";
@@ -813,6 +815,7 @@ function ExternalJobPaymentPanel({ job, settings, onChanged }) {
     try {
       const r = await callPayments("send_external_link", {
         bookingId: job.id, calloutPence: calloutP, partsPence: partsP, partsDescription: f.partsDescription,
+        labourPence: labourP, labourDescription: f.labourDescription,
         spPayoutPence: payoutP, outcome: f.outcome, method: f.method,
       });
       if (r?.url) navigator.clipboard?.writeText(r.url).catch?.(() => {});
@@ -839,20 +842,24 @@ function ExternalJobPaymentPanel({ job, settings, onChanged }) {
   // ext_callout_pence, which is what marks the link as sent), plus a record of
   // the customer's agreement. The amounts pre-fill the link when it's sent.
   const partsSavedP = job.extCalloutPence == null ? (job.extPartsPence ?? null) : null;
-  const partsChanged = partsP !== Number(job.extPartsPence || 0) || (f.partsDescription || "").trim() !== (job.extPartsDescription || "");
+  const partsChanged = partsP !== Number(job.extPartsPence || 0) || (f.partsDescription || "").trim() !== (job.extPartsDescription || "")
+    || labourP !== Number(job.extLabourPence || 0) || (f.labourDescription || "").trim() !== (job.extLabourDescription || "");
   const saveParts = async () => {
     setErr(""); setMsg("");
     if (f.parts !== "" && !(Number(f.parts) >= 0)) { setErr("Enter a valid parts amount."); return; }
+    if (f.labour !== "" && !(Number(f.labour) >= 0)) { setErr("Enter a valid labour amount."); return; }
+    const labourDesc = labourP > 0 ? (f.labourDescription || "").trim().slice(0, 200) || null : null;
     const desc = (f.partsDescription || "").trim().slice(0, 200);
     if (partsP > 0 && !desc) { setErr("Add a short parts description, so the customer sees what they agreed to on their checkout."); return; }
     setBusy("parts");
     const now = new Date().toISOString();
-    const { error } = await supabase.from("bookings").update(partsP > 0
+    const { error } = await supabase.from("bookings").update({ ext_labour_pence: labourP || null, ext_labour_description: labourDesc, ...(partsP > 0
       ? { ext_parts_pence: partsP, ext_parts_description: desc, parts_approval_status: "approved", parts_approved_at: now, parts_approval_method: "Agreed with the customer by phone (external SP job)" }
-      : { ext_parts_pence: null, ext_parts_description: null, parts_approval_status: "none", parts_approved_at: null, parts_approval_method: null }).eq("id", job.id);
+      : { ext_parts_pence: null, ext_parts_description: null, parts_approval_status: "none", parts_approved_at: null, parts_approval_method: null }) }).eq("id", job.id);
     setBusy("");
     if (error) { setErr(error.message); return; }
-    setMsg(partsP > 0 ? `Parts saved: ${penceToGBP(partsP)} (${desc}), agreed with the customer. They'll be included when you send the payment link.` : "Parts cleared.");
+    const saved = [partsP > 0 && `parts ${penceToGBP(partsP)} (${desc})`, labourP > 0 && `labour ${penceToGBP(labourP)}${labourDesc ? ` (${labourDesc})` : ""}`].filter(Boolean).join(" and ");
+    setMsg(saved ? `Saved ${saved}, agreed with the customer. Included when you send the payment link.` : "Parts and labour cleared.");
     await onChanged?.();
   };
   const patch = async (p) => {
@@ -880,22 +887,24 @@ function ExternalJobPaymentPanel({ job, settings, onChanged }) {
           <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(150px,1fr))", gap: 10 }}>
             <Fl label="Call-out fee (£)">{moneyInput(f.callout, set("callout"))}</Fl>
             <Fl label="Parts (£)">{moneyInput(f.parts, set("parts"))}</Fl>
+            <Fl label="Additional labour (£)">{moneyInput(f.labour, set("labour"))}</Fl>
             <Fl label="Owed to the SP (£)">{moneyInput(f.payout, set("payout"))}</Fl>
           </div>
           {chargeP != null && (
             <div style={{ fontSize: 11, color: C.mid, margin: "-4px 0 8px" }}>
               {autoPayout
-                ? <>Owed to the SP = callout charge {penceToGBP(chargeP)}{partsP > 0 && !(f.outcome === "Beyond Repair" && !closed) ? ` + parts ${penceToGBP(partsP)}` : ""}{partsP > 0 && f.outcome === "Beyond Repair" && !closed ? " (parts not added on a beyond-repair job)" : ""}.</>
-                : <>Owed to the SP set by hand. <button type="button" onClick={() => { setAutoPayout(true); setF((x) => ({ ...x, payout: autoFor(x) })); }} style={{ background: "none", border: "none", padding: 0, color: C.primary, cursor: "pointer", fontSize: 11, fontFamily: "inherit", textDecoration: "underline" }}>Reset to callout charge + parts</button></>}
+                ? <>Owed to the SP = callout charge {penceToGBP(chargeP)}{partsP > 0 && !(f.outcome === "Beyond Repair" && !closed) ? ` + parts ${penceToGBP(partsP)}` : ""}{labourP > 0 ? ` + labour ${penceToGBP(labourP)}` : ""}{partsP > 0 && f.outcome === "Beyond Repair" && !closed ? " (parts not added on a beyond-repair job)" : ""}.</>
+                : <>Owed to the SP set by hand. <button type="button" onClick={() => { setAutoPayout(true); setF((x) => ({ ...x, payout: autoFor(x) })); }} style={{ background: "none", border: "none", padding: 0, color: C.primary, cursor: "pointer", fontSize: 11, fontFamily: "inherit", textDecoration: "underline" }}>Reset to callout charge + parts + labour</button></>}
             </div>
           )}
           <Fl label="Parts description (shown on the customer's checkout)"><input style={inp} value={f.partsDescription} maxLength={200} onChange={(e) => set("partsDescription")(e.target.value)} placeholder="e.g. Drain pump" /></Fl>
+          {labourP > 0 && <Fl label="Labour description (shown on the customer's checkout)"><input style={inp} value={f.labourDescription} maxLength={200} onChange={(e) => set("labourDescription")(e.target.value)} placeholder="e.g. Extra 2 hours stripping down the oven" /></Fl>}
           {!hasAmounts && (
             <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap", margin: "-2px 0 12px" }}>
-              <Btn variant="ghost" sm disabled={!!busy || !partsChanged} onClick={saveParts}>{busy === "parts" ? "Saving…" : partsP > 0 ? "Save parts (customer agreed)" : "Save parts"}</Btn>
+              <Btn variant="ghost" sm disabled={!!busy || !partsChanged} onClick={saveParts}>{busy === "parts" ? "Saving…" : partsP > 0 || labourP > 0 ? "Save parts & labour (customer agreed)" : "Save parts & labour"}</Btn>
               <span style={{ fontSize: 11, color: partsChanged ? C.warn : C.mid }}>
                 {partsChanged
-                  ? "Unsaved parts. Save them once the customer has agreed, before taking payment."
+                  ? "Unsaved parts or labour. Save them once the customer has agreed, before taking payment."
                   : partsSavedP
                     ? <>Parts saved {penceToGBP(partsSavedP)}{job.extPartsDescription ? ` · ${job.extPartsDescription}` : ""}{job.partsApprovedAt ? ` · agreed with the customer ${fmtDateTime(job.partsApprovedAt)}` : ""}.</>
                     : "When the SP calls with the parts needed and the customer agrees, enter them here and save."}
@@ -921,6 +930,7 @@ function ExternalJobPaymentPanel({ job, settings, onChanged }) {
         <div style={{ marginTop: 12 }}>
           <Row k="Call-out" v={penceToGBP(m.callout)} />
           <Row k={`Parts${job.extPartsDescription ? ` · ${job.extPartsDescription}` : ""}`} v={penceToGBP(m.partsApproved)} />
+          {m.labour > 0 && <Row k={`Additional labour${job.extLabourDescription ? ` · ${job.extLabourDescription}` : ""}`} v={penceToGBP(m.labour)} />}
           {m.adminFee > 0 && <Row k="Late-payment admin fee" v={penceToGBP(m.adminFee)} />}
           <Row k={paid ? "Customer paid" : "Customer to pay"} v={penceToGBP(m.total)} strong />
           <Row k="Owed to the SP (bank transfer)" v={penceToGBP(m.engineerNet)} color={C.primary} strong />
