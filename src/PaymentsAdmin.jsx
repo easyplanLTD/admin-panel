@@ -719,9 +719,18 @@ export function JobPaymentPanel({ job, engineers = [], isOwner, onChanged }) {
   );
 }
 
-// Payment record (once Stripe has confirmed the payment).
+// Payment record (once Stripe has confirmed the payment, or a bank transfer was recorded).
 function PaymentRecordBox({ job }) {
-  if (!job.stripePaymentIntentId || !["paid", "refunded", "part_refunded"].includes(job.paymentStatus)) return null;
+  if (!["paid", "refunded", "part_refunded"].includes(job.paymentStatus)) return null;
+  if (job.paidVia === "bank_transfer") return (
+    <div style={{ marginTop: 12, padding: 10, borderRadius: 8, background: "rgba(255,255,255,0.04)", border: `1px solid ${C.border}` }}>
+      <div style={label()}>Payment record</div>
+      <Row k="Paid" v={job.paidAt ? fmtDateTime(job.paidAt) : "—"} />
+      <Row k="How" v="Bank transfer (not through Stripe)" />
+      <div style={{ fontSize: 11, color: C.light, marginTop: 2 }}>Refunds for this job are made by bank transfer, outside FixFlow.</div>
+    </div>
+  );
+  if (!job.stripePaymentIntentId) return null;
   return (
     <div style={{ marginTop: 12, padding: 10, borderRadius: 8, background: "rgba(255,255,255,0.04)", border: `1px solid ${C.border}` }}>
       <div style={label()}>Payment record</div>
@@ -967,7 +976,7 @@ function ExternalJobPaymentPanel({ job, settings, onChanged }) {
         {job.paymentStatus === "outstanding" && hasAmounts && !job.adminFeeAppliedAt && (
           <Btn variant="ghost" sm disabled={!!busy || !live} onClick={adminFee}>Add £{(settings.admin_fee_pence / 100).toFixed(2)} admin fee &amp; resend link</Btn>
         )}
-        {["paid", "part_refunded"].includes(job.paymentStatus) && <Btn variant="ghost" sm onClick={() => setModal("refund")}>Refund…</Btn>}
+        {["paid", "part_refunded"].includes(job.paymentStatus) && job.paidVia !== "bank_transfer" && <Btn variant="ghost" sm onClick={() => setModal("refund")}>Refund…</Btn>}
       </div>
       {msg && <div style={{ fontSize: 13, color: C.success, marginTop: 8 }}>{msg}</div>}
       <ErrorLine msg={err} />
