@@ -182,15 +182,17 @@ export function jobMoney(job, settings, overrides = [], { includePending = false
 export function externalJobMoney(job) {
   const callout = Number(job.extCalloutPence || 0);
   const parts = job.pendingOutcome === "Beyond Repair" ? 0 : Number(job.extPartsPence || 0);
+  // Additional labour the SP charged (0026), charged even on a beyond-repair job.
+  const labour = Number(job.extLabourPence || 0);
   const adminFee = job.adminFeeAppliedAt ? Number(job.adminFeePence || 0) : 0;
-  const total = callout + parts + adminFee;
+  const total = callout + parts + labour + adminFee;
   const payout = Math.min(total, Number(job.spPayoutPence || 0));
   const actualFee = job.stripeFeePence != null ? Number(job.stripeFeePence) : null;
   const fee = actualFee != null ? actualFee : estimateStripeFee(total);
   return {
     terms: { engineer_callout_share: 0, engineer_parts_share: 0, fee_bearer: "easyrepair", source: "External SP job (amounts set in FixFlow)" },
     external: true,
-    callout, partsAll: parts, partsApproved: parts, partsPending: 0, adminFee,
+    callout, partsAll: parts, partsApproved: parts, partsPending: 0, labour, adminFee,
     total, engineerCallout: 0, engineerParts: 0,
     engineerGross: payout, commission: total - payout,
     fee, feeIsEstimate: actualFee == null, engineerPaysFee: false,
@@ -308,6 +310,8 @@ export function mapPaymentFields(row = {}) {
     extCalloutPence: row.ext_callout_pence ?? null,
     extPartsPence: row.ext_parts_pence ?? null,
     extPartsDescription: row.ext_parts_description || "",
+    extLabourPence: row.ext_labour_pence ?? null,
+    extLabourDescription: row.ext_labour_description || "",
     spPayoutPence: row.sp_payout_pence ?? null,
     spPayoutStatus: row.sp_payout_status || null,
     spPaidAt: row.sp_paid_at || null,
