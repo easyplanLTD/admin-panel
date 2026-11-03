@@ -216,6 +216,9 @@ export function spPayFor(job) {
     if (!(amount > 0)) return null;
     if (job.spPayoutStatus === "paid") return { amount, state: "paid", via: "bank", date: job.spPaidAt, ref: job.spPayoutRef || "" };
     if (job.spPayoutStatus === "owed" || customerPaid) return { amount, state: "owed", via: "bank", date: job.paidAt };
+    // A cancelled job the customer never paid for has nothing left to pay the
+    // SP, so don't show it as "Waiting for customer".
+    if (job.status === "Cancelled") return null;
     return { amount, state: "pending", via: "bank" };
   }
   if (customerPaid && job.stripeAccountId && job.engineerSharePence != null) {
