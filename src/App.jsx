@@ -1100,7 +1100,15 @@ function JobDetail({job,onClose,onEdit,onReassign,onDelete,engineers,isOwner,onP
                 <span style={{background:C.purpleLight,color:C.purple,padding:"1px 7px",borderRadius:10,fontSize:9,fontWeight:800}}>EXTERNAL</span>
               </div>
               {job.externalCompany&&<div style={{color:C.mid,fontSize:12,marginTop:2}}>{job.externalCompany}</div>}
-              {job.spPayoutPence!=null&&<div style={{color:C.purple,fontSize:12,marginTop:2,fontWeight:700}}>Callout charge {fmtGBP(Number(job.spPayoutPence)/100)}</div>}
+              {job.spPayoutPence!=null&&(()=>{
+                // Before a payment link goes out, sp_payout_pence is the SP's callout charge.
+                // Once amounts are set it's their whole pay (callout + parts + labour), so split it out.
+                const pay=Number(job.spPayoutPence);
+                if(job.extCalloutPence==null) return <div style={{color:C.purple,fontSize:12,marginTop:2,fontWeight:700}}>Callout charge {fmtGBP(pay/100)}</div>;
+                const parts=job.pendingOutcome==="Beyond Repair"?0:Number(job.extPartsPence||0), labour=Number(job.extLabourPence||0), callout=pay-parts-labour;
+                const bits=(parts>0||labour>0)&&callout>=0?[`call-out ${fmtGBP(callout/100)}`,parts>0&&`parts ${fmtGBP(parts/100)}`,labour>0&&`labour ${fmtGBP(labour/100)}`].filter(Boolean).join(" + "):"";
+                return <div style={{color:C.purple,fontSize:12,marginTop:2,fontWeight:700}}>SP pay {fmtGBP(pay/100)}{bits&&<span style={{fontWeight:500,color:C.mid}}> ({bits})</span>}</div>;
+              })()}
               {job.externalPhone&&<div style={{color:C.mid,fontSize:12,marginTop:2}}><CallLink phone={job.externalPhone}/></div>}
               {job.externalEmail&&<div style={{color:C.mid,fontSize:12}}>✉ {job.externalEmail}</div>}
               {onTextSp&&job.externalPhone&&<Btn onClick={()=>onTextSp({name:job.externalName,phone:job.externalPhone,bookingId:job.id,bookingRef:job.bookingRef||('#'+job.id)})} variant="ghost" sm style={{marginTop:8,marginRight:6}}>💬 Text SP</Btn>}
