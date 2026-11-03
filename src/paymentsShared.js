@@ -319,7 +319,7 @@ export function mapPaymentFields(row = {}) {
   };
 }
 
-export const PAID_VIA_LABELS = { saved_card: "Saved card", online: "Online (payment link, QR or phone)" };
+export const PAID_VIA_LABELS = { saved_card: "Saved card", online: "Online (payment link, QR or phone)", bank_transfer: "Bank transfer" };
 
 // "Visa •••• 4242" (or "" if Stripe didn't give us the card).
 export function cardLabel(job) {
