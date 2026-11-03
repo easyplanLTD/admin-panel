@@ -1389,6 +1389,9 @@ async function payPage(url: URL) {
   if (m.adminFee > 0) items.push({ quantity: 1, price_data: { currency: "gbp", unit_amount: m.adminFee, product_data: { name: "Late payment admin fee" } } });
   const session = await stripe.checkout.sessions.create({
     mode: "payment",
+    // Card only (Apple Pay / Google Pay still show). Keeps Stripe Link off: with the
+    // customer's email filled in, Link texted a code to whoever owns the Link account.
+    payment_method_types: ["card"],
     line_items: items,
     customer_email: b.email || undefined,
     payment_intent_data: {
@@ -1425,6 +1428,8 @@ async function externalCheckout(b: any) {
   if (!b.is_test && !externalLinksLive(s)) return donePage("unavailable", b);
   const session = await externalClient(b).checkout.sessions.create({
     mode: "payment",
+    // Card only (Apple Pay / Google Pay still show), no Stripe Link code step. See above.
+    payment_method_types: ["card"],
     line_items: items,
     customer_email: b.email && !b.is_test ? b.email : undefined,
     payment_intent_data: {
