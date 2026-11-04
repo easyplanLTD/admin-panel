@@ -1,7 +1,8 @@
-import { useState, useMemo, useEffect, useRef, useCallback } from "react";
+import { useState, useMemo, useEffect, useRef, useCallback, createContext, useContext } from "react";
 import { supabase } from "./lib/supabaseClient";
 import { PaymentsSettings, JobPaymentPanel, JobStatusActions, DisputesView, CustomerPaymentsPanel, SpPaymentsPanel, PlanBillingPanel, useOpenFlagsCount } from "./PaymentsAdmin";
 import { mapPaymentFields, isStripeJob, spPayFor, spPayLabel } from "./paymentsShared";
+import { ATTENTION_TRIGGERS, DEFAULT_ATTENTION_TRIGGERS, attentionFor, groupTimes, sortAttentionFirst } from "./attention";
 
 // ─── CONSTANTS ───────────────────────────────────────────────────────────────
 // Same names and order as the website booking form (split 30 Oct 2026: Oven,
@@ -360,9 +361,27 @@ const CallLink = ({phone,style}) => {
 // Scheduled. The saved status stays "Assigned", so the Portal, Edge Functions
 // and payout logic are unaffected.
 const displayStatus = j => (j.status==="Assigned"&&j.scheduledDate) ? "Scheduled" : j.status;
-const Badge = ({status}) => {
+// ── NEEDS ATTENTION ──────────────────────────────────────────────────────────
+// Bookings that need attention (see src/attention.js) get a glowing status
+// pill with a pulsing dot. The map of bookingId -> {since, reasons} is built
+// once in App and shared through this context, so every <Badge jobId=...>
+// (Bookings table, Dashboard, SP job lists, booking detail) picks it up.
+const AttentionContext = createContext(new Map());
+const useAttention = id => useContext(AttentionContext).get(id) || null;
+if (typeof document !== "undefined" && !document.getElementById("er-attention-kf")) {
+  const st = document.createElement("style");
+  st.id = "er-attention-kf";
+  st.textContent = `
+@keyframes erAttGlow { 0%,100% { box-shadow: 0 0 0 1px var(--att), 0 0 6px 0 var(--att); } 50% { box-shadow: 0 0 0 1px var(--att), 0 0 14px 3px var(--att); } }
+@keyframes erAttDot  { 0%,100% { transform: scale(1); opacity: 1; box-shadow: 0 0 0 0 var(--att); } 50% { transform: scale(1.6); opacity: .65; box-shadow: 0 0 0 4px transparent; } }
+@media (prefers-reduced-motion: reduce) { .er-att, .er-att-dot { animation: none !important; } }`;
+  document.head.appendChild(st);
+}
+const attentionTitle = a => a ? `Needs attention since ${fmtDateTime(a.since)}\n` + a.reasons.map(r=>`• ${r.label} (${fmtDateTime(r.at)})`).join("\n") : undefined;
+const Badge = ({status,jobId}) => {
   const c = STATUS_C[status]||STATUS_C["Booked"];
-  return <span style={{background:c.bg,color:c.t,padding:"2px 9px",borderRadius:20,fontSize:11,fontWeight:700,display:"inline-flex",alignItems:"center",gap:4,whiteSpace:"nowrap"}}><span style={{width:6,height:6,borderRadius:"50%",background:c.dot,flexShrink:0}}/>{statusLabel(status)}</span>;
+  const att = useAttention(jobId);
+  return <span className={att?"er-att":undefined} title={attentionTitle(att)} style={{background:c.bg,color:c.t,padding:"2px 9px",borderRadius:20,fontSize:11,fontWeight:700,display:"inline-flex",alignItems:"center",gap:4,whiteSpace:"nowrap",...(att?{"--att":c.t,animation:"erAttGlow 1.6s ease-in-out infinite"}:{})}}><span className={att?"er-att-dot":undefined} style={{width:6,height:6,borderRadius:"50%",background:c.dot,flexShrink:0,...(att?{"--att":c.t,animation:"erAttDot 1.1s ease-in-out infinite"}:{})}}/>{statusLabel(status)}</span>;
 };
 const PBadge = ({p}) => {
   const m={Normal:{bg:"rgba(100,116,139,0.2)",t:"#94A3B8"},High:{bg:"rgba(251,191,36,0.15)",t:"#fbbf24"},Urgent:{bg:"rgba(248,113,113,0.15)",t:"#f87171"}}[p]||{bg:"rgba(100,116,139,0.2)",t:"#94A3B8"};
@@ -1076,16 +1095,61 @@ function SendSmsModal({recipient,onClose}){
   );
 }
 
+// Booking detail: why this booking is pulsing (if it is), and the manual
+// "Needs attention" flag staff can switch on/off (0028_attention.sql).
+function AttentionPanel({job,onChanged}){
+  const att = useAttention(job.id);
+  const [note,setNote] = useState(job.attentionManualNote||"");
+  const [busy,setBusy] = useState(false);
+  const [err,setErr] = useState("");
+  useEffect(()=>{ setNote(job.attentionManualNote||""); },[job.id,job.attentionManualNote]);
+  const setManual = async (on) => {
+    setBusy(true); setErr("");
+    const { error } = await supabase.from("bookings").update({attention_manual:on,attention_manual_note:on?(note.trim()||null):null}).eq("id",job.id);
+    setBusy(false);
+    if(error){ setErr(/attention_manual/.test(error.message)?"Run migration 0028_attention.sql in Supabase first.":error.message); return; }
+    onChanged&&onChanged();
+  };
+  const border = att ? C.warn : C.border;
+  return (
+    <div style={{background:"#161B22",border:`1px solid ${border}`,borderRadius:9,padding:"10px 12px",marginBottom:14,boxShadow:att?"0 0 12px rgba(251,191,36,0.15)":"none"}}>
+      <div style={{display:"flex",alignItems:"center",gap:8,flexWrap:"wrap"}}>
+        <div style={{fontSize:10,color:att?C.warn:C.light,fontWeight:800,textTransform:"uppercase",letterSpacing:.5}}>
+          {att?`Needs attention · since ${fmtDateTime(att.since)}`:"Needs attention · nothing outstanding"}
+        </div>
+        <div style={{marginLeft:"auto"}}>
+          {job.attentionManual
+            ? <Btn sm variant="ghost" onClick={()=>!busy&&setManual(false)}>{busy?"Saving…":"Clear manual flag"}</Btn>
+            : <Btn sm variant="ghost" onClick={()=>!busy&&setManual(true)} style={{color:C.warn}}>{busy?"Saving…":"⚑ Flag as needs attention"}</Btn>}
+        </div>
+      </div>
+      {att&&(
+        <div style={{marginTop:6,display:"flex",flexDirection:"column",gap:3}}>
+          {att.reasons.map(r=>(
+            <div key={r.key} style={{fontSize:12,color:C.text}}>• {r.label} <span style={{color:C.light}}>· {fmtDateTime(r.at)}</span>{r.key==="manual"&&job.attentionManualNote?<span style={{color:C.mid}}> · "{job.attentionManualNote}"</span>:null}</div>
+          ))}
+        </div>
+      )}
+      {!job.attentionManual&&(
+        <input style={{...inp,marginTop:8,fontSize:12,padding:"6px 10px"}} value={note} onChange={e=>setNote(e.target.value)} placeholder="Optional note for the flag (e.g. customer called, chase SP)"/>
+      )}
+      {err&&<div style={{color:C.danger,fontSize:12,marginTop:6}}>{err}</div>}
+    </div>
+  );
+}
+
 function JobDetail({job,onClose,onEdit,onReassign,onDelete,engineers,isOwner,onPaymentChanged,onTextSp}) {
   const eng = engineers.find(e=>e.id===job.engineerId);
   return (
     <div>
       <div style={{display:"flex",gap:7,marginBottom:14,flexWrap:"wrap"}}>
-        <Badge status={displayStatus(job)}/><PBadge p={job.priority}/>
+        <Badge status={displayStatus(job)} jobId={job.id}/><PBadge p={job.priority}/>
         {job.partsNeeded&&<span style={{background:C.warnLight,color:C.warn,padding:"2px 8px",borderRadius:4,fontSize:10,fontWeight:800}}>PARTS{job.partsOrdered?" · ORDERED":""}{job.partsArrived?" · ARRIVED":""}</span>}
         {job.returnVisitDate&&<span style={{background:C.primaryLight,color:C.primary,padding:"2px 8px",borderRadius:4,fontSize:10,fontWeight:800}}>↻ RETURN VISIT</span>}
         {job.wantsProtectionPlan&&<span style={{background:C.purpleLight,color:C.purple,padding:"2px 8px",borderRadius:4,fontSize:10,fontWeight:800}}>🛡 PROTECTION PLAN</span>}
       </div>
+
+      <AttentionPanel job={job} onChanged={onPaymentChanged}/>
 
       {/* Appliance banner */}
       <div style={{background:C.primaryLight,border:`1px solid #BFDBFE`,borderRadius:9,padding:"10px 16px",marginBottom:14}}>
@@ -1760,7 +1824,7 @@ function ExternalSpsSection({externalSps,extTab,onExtTabChange,jobs,isOwner,acce
               <div style={{padding:"8px 15px"}}>
                 {spJobs.filter(j=>!["Completed","Beyond Repair","Cancelled"].includes(j.status)).slice(0,2).map(j=>(
                   <div key={j.id} onClick={()=>onOpenJob(j)} style={{display:"flex",justifyContent:"space-between",alignItems:"center",fontSize:12,padding:"4px 0",cursor:"pointer",color:C.mid}} onMouseOver={e=>e.currentTarget.style.color=accent} onMouseOut={e=>e.currentTarget.style.color=C.mid}>
-                    <span><strong style={{color:C.text}}>{j.customer}</strong> · {j.appliance}{j.brand?` · ${j.brand}`:""}</span><Badge status={displayStatus(j)}/>
+                    <span><strong style={{color:C.text}}>{j.customer}</strong> · {j.appliance}{j.brand?` · ${j.brand}`:""}</span><Badge status={displayStatus(j)} jobId={j.id}/>
                   </div>
                 ))}
                 {!spJobs.filter(j=>!["Completed","Beyond Repair","Cancelled"].includes(j.status)).length&&<div style={{fontSize:11,color:C.light,fontStyle:"italic"}}>No active jobs</div>}
@@ -2035,7 +2099,7 @@ function EngineerJobsList({eng,jobs,onOpenJob}) {
               <div style={{fontWeight:700,fontSize:13,color:C.text,display:"flex",alignItems:"center",gap:6}}>{j.customer}{j.isTest&&<TestPill/>}</div>
               <div style={{fontSize:11,color:C.light,marginTop:1}}>{j.bookingRef||('#'+j.id)} · {j.appliance}{j.brand?` · ${j.brand}`:""}{j.scheduledDate?` · ${fmt(j.scheduledDate)}`:""}</div>
             </div>
-            <Badge status={displayStatus(j)}/>
+            <Badge status={displayStatus(j)} jobId={j.id}/>
           </div>
         ))}
       </div>
@@ -2288,6 +2352,11 @@ function mapBookingRow(row){
     // Set by the generate-test-data Edge Function (Settings -> System ->
     // Test) -- never by anything a person fills in themselves.
     isTest: !!row.is_test,
+    // Needs-attention support (0028_attention.sql): manual flag + the stamps
+    // used to order flagged bookings by when they started needing attention.
+    attentionManual: !!row.attention_manual, attentionManualAt: row.attention_manual_at||null,
+    attentionManualNote: row.attention_manual_note||"",
+    assignedAt: row.assigned_at||null, partsRequestedAt: row.parts_requested_at||null,
   };
 }
 function bookingFieldsToRow(form){
@@ -2695,7 +2764,76 @@ const WEBSITE_SUBTABS = [
 // way so another System area can be added the same way Website's were.
 const SYSTEM_SUBTABS = [
   {key:"test",label:"Test"},
+  {key:"attention",label:"Attention triggers"},
 ];
+
+// ─── SYSTEM -> ATTENTION TRIGGERS ────────────────────────────────────────────
+// Which situations make a booking's status pill glow + pulse and sort to the
+// top of Bookings (logic in src/attention.js), plus a notes box for tracking
+// trigger ideas to add later. Stored in public.attention_settings (one row,
+// 0028_attention.sql); owner-only to change, like the rest of Settings.
+function AttentionTriggersPanel({onSaved}){
+  const [loaded,setLoaded] = useState(false);
+  const [missing,setMissing] = useState(false);
+  const [triggers,setTriggers] = useState(DEFAULT_ATTENTION_TRIGGERS);
+  const [notes,setNotes] = useState("");
+  const [updatedAt,setUpdatedAt] = useState(null);
+  const [busy,setBusy] = useState(false);
+  const [msg,setMsg] = useState(null); // {ok:boolean,text}
+  useEffect(()=>{
+    (async()=>{
+      const { data, error } = await supabase.from("attention_settings").select("*").eq("id",1).maybeSingle();
+      if(error||!data){ setMissing(true); }
+      else { setTriggers({...DEFAULT_ATTENTION_TRIGGERS,...(data.triggers||{})}); setNotes(data.notes||""); setUpdatedAt(data.updated_at||null); }
+      setLoaded(true);
+    })();
+  },[]);
+  const save = async () => {
+    setBusy(true); setMsg(null);
+    const { data:{ user } } = await supabase.auth.getUser();
+    const now = new Date().toISOString();
+    const { error } = await supabase.from("attention_settings").update({triggers,notes,updated_at:now,updated_by:user?.id||null}).eq("id",1);
+    setBusy(false);
+    if(error){ setMsg({ok:false,text:error.message}); return; }
+    setUpdatedAt(now); setMsg({ok:true,text:"Saved"}); onSaved&&onSaved();
+  };
+  if(!loaded) return <div style={{color:C.mid,fontSize:13}}>Loading…</div>;
+  return (
+    <div>
+      <div style={{fontSize:12,fontWeight:700,color:C.mid,textTransform:"uppercase",letterSpacing:.6,marginBottom:10}}>System → Attention triggers</div>
+      <div style={{fontSize:13,color:C.mid,lineHeight:1.5,marginBottom:14}}>
+        When any switched-on trigger applies to a booking, its status pill glows and the dot pulses, and it's listed first on Bookings
+        ("Pulsating records shown first"), oldest trigger at the top. It stops pulsing by itself once the situation is dealt with;
+        the manual flag stays on until someone clears it on the booking.
+      </div>
+      {missing&&<div style={{background:"rgba(251,191,36,0.15)",color:C.warn,borderRadius:7,padding:"8px 12px",fontSize:12,marginBottom:14,fontWeight:600}}>
+        Run migration <code>0028_attention.sql</code> in the Supabase SQL Editor to save these settings. Until then every trigger below is on (except the manual flag, which needs the migration).
+      </div>}
+      <div style={{background:C.card,border:`1px solid ${C.border}`,borderRadius:13,overflow:"hidden",marginBottom:16}}>
+        {ATTENTION_TRIGGERS.map((t,i)=>(
+          <label key={t.key} style={{display:"flex",alignItems:"flex-start",gap:12,padding:"12px 16px",borderTop:i?`1px solid ${C.border}`:"none",cursor:missing?"default":"pointer"}}>
+            <input type="checkbox" disabled={missing} checked={!!triggers[t.key]} onChange={e=>setTriggers(x=>({...x,[t.key]:e.target.checked}))} style={{marginTop:3,accentColor:C.primary,cursor:"inherit"}}/>
+            <div style={{flex:1}}>
+              <div style={{fontSize:13,fontWeight:800,color:triggers[t.key]?C.text:C.light}}>{t.label}</div>
+              <div style={{fontSize:12,color:C.mid,marginTop:2}}>{t.desc}</div>
+              <div style={{fontSize:11,color:C.light,marginTop:2}}>Timed from: {t.since.toLowerCase()}</div>
+            </div>
+            <span style={{fontSize:10,fontWeight:800,padding:"2px 8px",borderRadius:20,background:triggers[t.key]?C.successLight:"rgba(255,255,255,0.06)",color:triggers[t.key]?C.success:C.light}}>{triggers[t.key]?"ON":"OFF"}</span>
+          </label>
+        ))}
+      </div>
+      <Fl label="Notes: ideas for future triggers">
+        <textarea style={{...inp,minHeight:120,resize:"vertical",lineHeight:1.5}} disabled={missing} value={notes} onChange={e=>setNotes(e.target.value)}
+          placeholder={"e.g.\n• Visit date passed but job not completed\n• No SP response 2 hours after assignment\n• Customer replied by SMS"}/>
+      </Fl>
+      <div style={{display:"flex",alignItems:"center",gap:12}}>
+        <Btn onClick={()=>!busy&&!missing&&save()}>{busy?"Saving…":"Save"}</Btn>
+        {msg&&<span style={{fontSize:12,fontWeight:700,color:msg.ok?C.success:C.danger}}>{msg.text}</span>}
+        {updatedAt&&<span style={{fontSize:11,color:C.light,marginLeft:"auto"}}>Last saved {fmtDateTime(updatedAt)}</span>}
+      </div>
+    </div>
+  );
+}
 
 // ─── SYSTEM -> TEST -- system-generated Test Jobs / Test SP's ────────────
 // Settings for the two generators live in the `test_generators` table (one
@@ -2879,7 +3017,7 @@ function TestGeneratorsPanel({onReloadJobs,onReloadEngineers}){
   );
 }
 
-function SettingsView({engineers=[],pricing,onReload,users,onUserCreated,currentUserId,usersTab,onUsersTabChange,onArchive,onRestore,onDelete,onResetPassword,onReloadJobs,onReloadEngineers}){
+function SettingsView({onAttentionSaved,engineers=[],pricing,onReload,users,onUserCreated,currentUserId,usersTab,onUsersTabChange,onArchive,onRestore,onDelete,onResetPassword,onReloadJobs,onReloadEngineers}){
   const [editArea,setEditArea] = useState(null);
   const [search,setSearch] = useState("");
   const [section,setSection] = useState("website"); // "system" | "website" | "users" | "payments" | "assignment"
@@ -2911,6 +3049,7 @@ function SettingsView({engineers=[],pricing,onReload,users,onUserCreated,current
         <div>
           <SettingsSubTabs tabs={SYSTEM_SUBTABS} value={systemTab} onChange={setSystemTab}/>
           {systemTab==="test" && <TestGeneratorsPanel onReloadJobs={onReloadJobs} onReloadEngineers={onReloadEngineers}/>}
+          {systemTab==="attention" && <AttentionTriggersPanel onSaved={onAttentionSaved}/>}
         </div>
       )}
 
@@ -3037,6 +3176,44 @@ function useOpenDeclines(enabled){
   return [rows,acknowledge];
 }
 
+// Open (unresolved) dispute/problem flags -- just booking_id + when raised,
+// for the "Open dispute or problem" attention trigger.
+function useOpenFlagRows(enabled){
+  const [rows,setRows] = useState([]);
+  useEffect(()=>{
+    if(!enabled) return;
+    let alive = true;
+    const load = async () => {
+      const { data, error } = await supabase.from("job_flags").select("booking_id,created_at").neq("status","resolved");
+      if(alive && !error) setRows(data||[]);
+    };
+    load();
+    const ch = supabase.channel("job-flags-attention").on("postgres_changes",{event:"*",schema:"public",table:"job_flags"},load).subscribe();
+    const t = setInterval(load, 60000);
+    return () => { alive=false; clearInterval(t); supabase.removeChannel(ch); };
+  },[enabled]);
+  return rows;
+}
+
+// Settings -> System -> Attention triggers (0028_attention.sql). Falls back
+// to "everything on" if the table isn't there yet, so the feature still
+// works before the migration is run (minus the manual flag/stamps).
+function useAttentionSettings(enabled){
+  const [row,setRow] = useState({triggers:DEFAULT_ATTENTION_TRIGGERS,notes:"",missing:false});
+  const load = useCallback(async () => {
+    const { data, error } = await supabase.from("attention_settings").select("*").eq("id",1).maybeSingle();
+    if(error||!data) { setRow(r=>({...r,missing:!!error})); return; }
+    setRow({triggers:{...DEFAULT_ATTENTION_TRIGGERS,...(data.triggers||{})},notes:data.notes||"",updatedAt:data.updated_at||null,missing:false});
+  },[]);
+  useEffect(()=>{
+    if(!enabled) return;
+    load();
+    const ch = supabase.channel("attention-settings").on("postgres_changes",{event:"*",schema:"public",table:"attention_settings"},load).subscribe();
+    return () => { supabase.removeChannel(ch); };
+  },[enabled,load]);
+  return [row,load];
+}
+
 function DeclineAlerts({declines,jobs,onOpenJob,onDismiss}){
   if(!declines.length) return null;
   return (
@@ -3087,6 +3264,9 @@ export default function App() {
   const [fsStatus,setFsStatus]    = useState("NotCancelled");
   const [fsEng,setFsEng]          = useState("All");
   const [fsSearch,setFsSearch]    = useState("");
+  // Bookings ordering. Always starts on "attention" (pulsating records first,
+  // oldest trigger at the top) each time the panel loads.
+  const [fsOrder,setFsOrder]      = useState("attention");    // "attention" | "attentionOnly" | "newest"
   const [fsPreset,setFsPreset]    = useState("");           // "" | "today" | "unassigned" | "active" -- set by clicking a Dashboard stat card; shown as a removable chip on Bookings
   const [qSearch,setQSearch]      = useState("");           // search box on the Quotes page
   const [globalSearch,setGlobalSearch]       = useState(""); // sidebar "jump to booking" box -- keyed on booking_ref
@@ -3153,6 +3333,15 @@ export default function App() {
   const isOwner = currentUser?.role==="owner";
   const openFlags = useOpenFlagsCount();
   const [openDeclines,ackDeclines] = useOpenDeclines(!!currentUser);
+  // Needs-attention map (bookingId -> {since, reasons}) -- see src/attention.js.
+  const openFlagRows = useOpenFlagRows(!!currentUser);
+  const [attSettings,reloadAttSettings] = useAttentionSettings(!!currentUser);
+  const attMap = useMemo(()=>{
+    const ctx = { declines: groupTimes(openDeclines,"declined_at"), flags: groupTimes(openFlagRows,"created_at"), triggers: attSettings.triggers };
+    const m = new Map();
+    for(const j of jobs){ const a = attentionFor(j,ctx); if(a) m.set(j.id,a); }
+    return m;
+  },[jobs,openDeclines,openFlagRows,attSettings]);
   const accent  = {owner:C.purple,staff:C.primary}[currentUser?.role]||C.primary;
 
   // A failed load here used to just silently leave whatever was already in
@@ -3554,8 +3743,13 @@ export default function App() {
     if(fsEng==="External"&&!j.isExternal)return false;
     else if(fsEng!=="All"&&fsEng!=="External"&&j.engineerId!==fsEng)return false;
     if(fsSearch&&![j.customer,j.address,String(j.id),j.bookingRef||"",j.appliance,j.brand||"",j.postcode||""].some(s=>s.toLowerCase().includes(fsSearch.toLowerCase())))return false;
+    if(fsOrder==="attentionOnly"&&!attMap.has(j.id))return false;
     return true;
   });
+  // Pulsating (needs-attention) records first, in the order they started
+  // pulsing; everything else keeps the usual newest-first order beneath.
+  const shownJobs = fsOrder==="newest" ? filtJobs : sortAttentionFirst(filtJobs, j=>attMap.get(j.id));
+  const attentionCount = filtJobs.filter(j=>attMap.has(j.id)).length;
 
   // Quotes -- booking-form submissions that stalled before turning into a
   // real job (no schedule, no SP). Currently these only get created here via
@@ -3792,6 +3986,7 @@ export default function App() {
   if(currentUser.must_change_password) return <SetPasswordScreen onDone={onPasswordChanged}/>;
 
   return (
+    <AttentionContext.Provider value={attMap}>
     <div style={{fontFamily:"'Inter','Segoe UI',sans-serif",background:"#000000",color:C.text,minHeight:"100vh",display:"flex"}}>
       {/* Sidebar -- desktop/tablet only; "display:flex" lives in the className
           (not inline) so the "hidden" half of "hidden md:flex" can actually
@@ -3927,7 +4122,7 @@ export default function App() {
                       <div style={{color:C.mid,fontSize:11}}>{j.address}</div>
                     </div>
                     <div style={{fontSize:11,color:C.mid}}>{j.isExternal?<>{j.externalName} <span style={{color:C.purple,fontWeight:700}}>(External)</span></>:eng?.name||<span style={{color:cx?C.cancelled:C.unassigned,fontWeight:700}}>Unassigned</span>}</div>
-                    <Badge status={displayStatus(j)}/><PBadge p={j.priority}/>
+                    <Badge status={displayStatus(j)} jobId={j.id}/><PBadge p={j.priority}/>
                   </div>;
                 })}
               </div>
@@ -4006,6 +4201,11 @@ export default function App() {
               <div style={{display:"flex",gap:9,marginBottom:12,flexWrap:"wrap"}}>
                 <input style={{...inp,maxWidth:210}} placeholder="Name / address / brand / ref / #ID" value={fsSearch} onChange={e=>setFsSearch(e.target.value)}/>
                 <select style={{...inp,maxWidth:155}} value={fsStatus} onChange={e=>setFsStatus(e.target.value)}><option value="NotCancelled">All except Cancelled</option><option value="All">All Statuses</option>{STATUSES.filter(s=>s!=="Quote").flatMap(s=>s==="Assigned"?["Assigned","Scheduled"]:[s]).map(s=><option key={s} value={s}>{statusLabel(s)}</option>)}</select>
+                <select style={{...inp,maxWidth:235,borderColor:fsOrder!=="newest"?C.primary:undefined}} value={fsOrder} onChange={e=>setFsOrder(e.target.value)} title="Needs-attention bookings have a glowing status pill with a pulsing dot" aria-label="Order">
+                  <option value="attention">Pulsating records shown first{attentionCount?` (${attentionCount})`:""}</option>
+                  <option value="attentionOnly">Pulsating records only{attentionCount?` (${attentionCount})`:""}</option>
+                  <option value="newest">Newest first (no grouping)</option>
+                </select>
                 <select style={{...inp,maxWidth:165}} value={fsEng} onChange={e=>setFsEng(e.target.value)}><option value="All">All SP's</option><option value="External">External (one-off)</option>{engineers.map(e=><option key={e.id} value={e.id}>{e.name}</option>)}</select>
                 {fsPreset&&(
                   <div style={{display:"flex",alignItems:"center",gap:7,background:"rgba(212,255,60,0.08)",border:`1px solid ${C.primary}`,color:C.primary,borderRadius:20,padding:"5px 8px 5px 12px",fontSize:12,fontWeight:700}}>
@@ -4029,7 +4229,7 @@ export default function App() {
                     ))}
                   </tr></thead>
                   <tbody>
-                    {filtJobs.length===0?<tr><td colSpan={isOwner?11:10} style={{padding:28,textAlign:"center",color:C.light}}>No bookings found</td></tr>:filtJobs.map(j=>{
+                    {shownJobs.length===0?<tr><td colSpan={isOwner?11:10} style={{padding:28,textAlign:"center",color:C.light}}>{fsOrder==="attentionOnly"?"Nothing needs attention right now":"No bookings found"}</td></tr>:shownJobs.map(j=>{
                       const eng=engineers.find(e=>e.id===j.engineerId);
                       const cx=j.status==="Cancelled";
                       return <tr key={j.id} onClick={()=>setSelJob(j)} style={{cursor:"pointer",color:cx?C.cancelled:undefined,borderBottom:`1px solid #262626`,background:selectedJobIds.has(j.id)?"rgba(212,255,60,0.06)":"transparent"}} onMouseOver={e=>{if(!selectedJobIds.has(j.id))e.currentTarget.style.background="#1E2530";}} onMouseOut={e=>{e.currentTarget.style.background=selectedJobIds.has(j.id)?"rgba(212,255,60,0.06)":"transparent";}}>
@@ -4045,7 +4245,7 @@ export default function App() {
                         <td style={{padding:"9px 13px",fontSize:12}}>{j.applianceAgeLabel?j.applianceAgeLabel:(j.applianceAge===""||j.applianceAge==null)?<span style={{color:C.light}}>—</span>:`${j.applianceAge}yr`}</td>
                         <td style={{padding:"9px 13px",fontSize:11}}>{fmt(j.scheduledDate)}<br/><span style={{color:C.light}}>{slotLabel(j.scheduledTime)}</span></td>
                         <td style={{padding:"9px 13px",fontSize:12,color:cx?C.cancelled:j.isExternal?C.purple:eng?C.text:C.unassigned,fontWeight:j.isExternal||!eng?700:400}}>{j.isExternal?`${j.externalName} (External)`:eng?.name||"Unassigned"}</td>
-                        <td style={{padding:"9px 13px"}}><Badge status={displayStatus(j)}/></td>
+                        <td style={{padding:"9px 13px"}}><Badge status={displayStatus(j)} jobId={j.id}/>{attMap.get(j.id)&&<div style={{color:C.warn,fontSize:10,fontWeight:700,marginTop:4,whiteSpace:"nowrap"}} title={attentionTitle(attMap.get(j.id))}>⏱ {fmtDateTime(attMap.get(j.id).since)}</div>}</td>
                         <td style={{padding:"9px 13px",fontSize:12,fontWeight:800,color:cx?C.cancelled:C.text}} title={calloutPackageLabel(j)}>{fmtGBP(calloutFeeFor(j))}<div style={{color:C.light,fontSize:10,fontWeight:600}}>{calloutPackageLabel(j)}</div></td>
                         {(()=>{const sp=spPayFor(j);return <td style={{padding:"9px 13px",fontSize:12,fontWeight:800,color:!sp?C.light:sp.state==="paid"?C.success:sp.state==="owed"?C.danger:C.warn}} title={spPayLabel(sp)}>{sp?`£${(sp.amount/100).toFixed(2)}`:"—"}{sp?.state==="paid"?" ✓":""}{sp&&<div style={{color:C.light,fontSize:10,fontWeight:600}}>{spPayLabel(sp)}</div>}</td>;})()}
                       </tr>;
@@ -4392,7 +4592,7 @@ export default function App() {
                       <div style={{padding:"8px 15px"}}>
                         {eJobs.filter(j=>!["Completed","Beyond Repair","Cancelled"].includes(j.status)).slice(0,2).map(j=>(
                           <div key={j.id} onClick={e=>{e.stopPropagation();setSelJob(j);}} style={{display:"flex",justifyContent:"space-between",alignItems:"center",fontSize:12,padding:"4px 0",cursor:"pointer",color:C.mid}} onMouseOver={e=>e.currentTarget.style.color=C.primary} onMouseOut={e=>e.currentTarget.style.color=C.mid}>
-                            <span><strong style={{color:C.text}}>{j.customer}</strong> · {j.appliance}{j.brand?` · ${j.brand}`:""}</span><Badge status={displayStatus(j)}/>
+                            <span><strong style={{color:C.text}}>{j.customer}</strong> · {j.appliance}{j.brand?` · ${j.brand}`:""}</span><Badge status={displayStatus(j)} jobId={j.id}/>
                           </div>
                         ))}
                         {!eJobs.filter(j=>!["Completed","Beyond Repair","Cancelled"].includes(j.status)).length&&<div style={{fontSize:11,color:C.light,fontStyle:"italic"}}>No active jobs</div>}
@@ -4424,7 +4624,7 @@ export default function App() {
 
           {/* ── SETTINGS (Website[Pricing/Services/Content/Booking Form], Users, Payments, Assignment) ── */}
           {view==="settings"&&isOwner&&(
-            <SettingsView engineers={engineers} pricing={pricing} onReload={loadPricing}
+            <SettingsView onAttentionSaved={reloadAttSettings} engineers={engineers} pricing={pricing} onReload={loadPricing}
               users={users} onUserCreated={loadStaffUsers} currentUserId={currentUser.id}
               usersTab={usersTab} onUsersTabChange={setUsersTab}
               onArchive={(u)=>askArchive(u.id,u.name||u.email)}
@@ -4595,6 +4795,7 @@ export default function App() {
         </Modal>
       )}
     </div>
+    </AttentionContext.Provider>
   );
 }
 
