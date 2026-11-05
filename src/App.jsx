@@ -371,10 +371,27 @@ const CallLink = ({phone,style}) => {
 //    Portal, or the external SP payment panel) and the customer hasn't paid
 //    yet. Same rule as the Portal's isAwaitingPayment(). The job completes by
 //    itself once paid (markJobPaid applies pending_outcome).
-//  - Scheduled: an Assigned job that has a visit date.
+//  - In Progress: an Assigned job whose visit time has been reached (the start
+//    of its AM/PM slot -- see visitStarted). A job saved as "In Progress"
+//    (e.g. Mark In Progress in the Portal) shows as In Progress anyway.
+//  - Scheduled: an Assigned job that has a visit date that hasn't started yet.
 // The saved status stays as it was (usually "Assigned").
+// When a visit counts as started: the start of its slot, in the browser's
+// (UK) local time. Older bookings may hold a clock time like "09:00"; a visit
+// with no time counts from 8am.
+const SLOT_START = { AM:"08:00", PM:"12:00", "All day":"08:00" };
+function visitStarted(j, now = new Date()){
+  if(!j.scheduledDate) return false;
+  const raw = String(j.scheduledTime||"");
+  const m = SLOT_START[raw] ? SLOT_START[raw].split(":") : raw.match(/^(\d{1,2}):(\d{2})/)?.slice(1) || ["08","00"];
+  const [y,mo,d] = String(j.scheduledDate).slice(0,10).split("-").map(Number);
+  if(!y||!mo||!d) return false;
+  return now >= new Date(y, mo-1, d, Number(m[0]), Number(m[1]));
+}
 const isAwaitingPayment = j => !!j.pendingOutcome && j.paymentStatus==="outstanding" && !["Completed","Beyond Repair","Cancelled","Quote"].includes(j.status);
-const displayStatus = j => isAwaitingPayment(j) ? "Awaiting Payment" : (j.status==="Assigned"&&j.scheduledDate) ? "Scheduled" : j.status;
+const displayStatus = j => isAwaitingPayment(j) ? "Awaiting Payment"
+  : (j.status==="Assigned"&&j.scheduledDate) ? (visitStarted(j) ? "In Progress" : "Scheduled")
+  : j.status;
 // ── NEEDS ATTENTION ──────────────────────────────────────────────────────────
 // Bookings that need attention (see src/attention.js) get a glowing status
 // pill with a pulsing dot. The map of bookingId -> {since, reasons} is built
@@ -1061,7 +1078,8 @@ const JOB_STEPS = ["Booked","Assigned","Scheduled","In Progress","Completed"];
 function jobStep(job){
   const done = job.status==="Completed"||job.status==="Beyond Repair";
   if(done) return 5;
-  if(job.status==="In Progress"||job.status==="Parts Awaited") return 4;
+  if(job.status==="In Progress"||job.status==="Parts Awaited"||isAwaitingPayment(job)) return 4;
+  if(job.scheduledDate&&visitStarted(job)) return 4;
   if(job.scheduledDate) return 3;
   if(job.engineerId||job.isExternal) return 2;
   return 1;
@@ -3494,6 +3512,10 @@ function DeclineAlerts({declines,jobs,onOpenJob,onDismiss}){
 }
 
 export default function App() {
+  // Re-render once a minute so "Scheduled" turns into "In Progress" when a
+  // visit's time is reached, even if no booking data changes.
+  const [,setMinuteTick] = useState(0);
+  useEffect(()=>{ const i=setInterval(()=>setMinuteTick(t=>t+1),60000); return ()=>clearInterval(i); },[]);
   const [currentUser,setCU]       = useState(null);
   const [authChecked,setAuthChecked] = useState(false);
   const [jobs,setJobs]            = useState([]);
