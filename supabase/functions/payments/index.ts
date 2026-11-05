@@ -95,7 +95,7 @@ const fail = (msg: string, status = 400): never => { throw new UserError(msg, st
 const DEFAULTS: Record<string, any> = {
   payments_live: false, callout_protection_pence: 7999, callout_repair_only_pence: 9999,
   engineer_callout_share: 62.51, engineer_parts_share: 100, fee_bearer: "easyrepair",
-  admin_fee_pence: 1000, admin_fee_engineer_share: 0, late_cancel_fee_pence: 2500, free_cancel_hours: 48,
+  admin_fee_pence: 1000, admin_fee_engineer_share: 0, admin_fee_grace_hours: 24, late_cancel_fee_pence: 2500, free_cancel_hours: 48,
   late_cancel_engineer_share: 0, no_show_fee_pence: 2500, no_show_engineer_share: 50, recovery_invoice_days: 30,
   plan_monthly_tiers: [799, 1299, 1699, 2000], plan_monthly_extra_pence: 499,
   plan_annual_tiers: [8629, 14029, 18349, 21600], plan_annual_extra_pence: 5389,
@@ -795,7 +795,7 @@ async function applyAdminFee(c: Caller, body: any) {
   if (b.payment_status === "paid") fail("This job has already been paid.");
   await updateBooking(b.id, { admin_fee_pence: s.admin_fee_pence, admin_fee_applied_at: new Date().toISOString() });
   return await sendPaymentLinkFor({ ...b, admin_fee_pence: s.admin_fee_pence, admin_fee_applied_at: new Date().toISOString() },
-    `As payment wasn't made on the day, a ${gbp(s.admin_fee_pence)} admin fee has been added.`);
+    `As payment wasn't made within ${Number(s.admin_fee_grace_hours || 24)} hours of the job being completed, a ${gbp(s.admin_fee_pence)} admin fee has been added.`);
 }
 
 // ─── External SP jobs (FixFlow) ──────────────────────────────────────────
@@ -1187,10 +1187,43 @@ async function cancelPlan(c: Caller, body: any) {
   }
 }
 
+// ------------------------------------------------------- late-payment admin fee
+// Pay after repair jobs, and external SP jobs with a payment link (0022), still
+// unpaid admin_fee_grace_hours (default 24) after the payment clock started
+// (awaiting_payment_since: set when the job is completed / the link first sent).
+async function applyDueAdminFees(c: Caller, s: any): Promise<number> {
+  const externalOnly = !s.payments_live;
+  const graceHours = Math.max(1, Number(s.admin_fee_grace_hours || 24));
+  const cutoff = new Date(Date.now() - graceHours * 3600_000).toISOString();
+  let unpaidQ = db.from("bookings").select("*")
+    .or(externalOnly ? "and(is_external.eq.true,ext_callout_pence.not.is.null)" : "payment_timing.eq.after,and(is_external.eq.true,ext_callout_pence.not.is.null)")
+    .eq("payment_status", "outstanding")
+    .is("admin_fee_applied_at", null).lte("awaiting_payment_since", cutoff);
+  if (externalOnly) unpaidQ = unpaidQ.eq("is_test", false);
+  const { data: unpaid } = await unpaidQ;
+  let n = 0;
+  for (const b of unpaid || []) {
+    try { await applyAdminFee(c, { bookingId: b.id }); n++; } catch (_) { /* keep going */ }
+  }
+  return n;
+}
+
+// Hourly schedule (migration 0028): only the admin fee step of the daily run.
+async function adminFees(c: Caller) {
+  requireStaff(c);
+  const s = await settings();
+  if (!s.payments_live && !externalLinksLive(s)) return { skipped: "payments not live" };
+  const out = { adminFees: await applyDueAdminFees(c, s) };
+  if (out.adminFees) console.log("admin fee run", JSON.stringify(out));
+  return out;
+}
+
 // --------------------------------------------------------------- daily jobs
 // Run once a day (Supabase cron or any scheduler POSTing
 // {"action":"daily","cronSecret":"..."}):
-//   * Pay after repair jobs unpaid at the end of the completion day: add the admin fee and resend the link
+//   * Pay after repair jobs unpaid 24 hours after completion: add the admin fee and resend the link
+//     (also run every hour on its own via {"action":"admin_fees"}, migration 0028, so the fee
+//     lands within an hour of the 24-hour mark rather than at the next morning's run)
 //   * Protection plan renewal reminders, and rolling plans into their next 12-month term
 //   * Commission recoveries still pending after N days: marked "invoiced" for staff to chase
 
@@ -1201,18 +1234,8 @@ async function daily(c: Caller) {
   // Before full go-live, only external SP links (if they're live) get the admin fee.
   const externalOnly = !s.payments_live;
   if (externalOnly && !externalLinksLive(s)) return { skipped: "payments not live" };
-  const today = new Date().toISOString().slice(0, 10);
 
-  // Pay after repair jobs, and external SP jobs with a payment link (0022).
-  let unpaidQ = db.from("bookings").select("*")
-    .or(externalOnly ? "and(is_external.eq.true,ext_callout_pence.not.is.null)" : "payment_timing.eq.after,and(is_external.eq.true,ext_callout_pence.not.is.null)")
-    .eq("payment_status", "outstanding")
-    .is("admin_fee_applied_at", null).lt("awaiting_payment_since", `${today}T00:00:00Z`);
-  if (externalOnly) unpaidQ = unpaidQ.eq("is_test", false);
-  const { data: unpaid } = await unpaidQ;
-  for (const b of unpaid || []) {
-    try { await applyAdminFee(c, { bookingId: b.id }); out.adminFees++; } catch (_) { /* keep going */ }
-  }
+  out.adminFees = await applyDueAdminFees(c, s);
   if (externalOnly) { console.log("daily run (external links only)", JSON.stringify(out)); return out; }
 
   const now = new Date();
@@ -1581,6 +1604,7 @@ const ACTIONS: Record<string, (c: Caller, body: any) => Promise<unknown>> = {
   update_plan: updatePlan,
   cancel_plan: cancelPlan,
   daily: (c) => daily(c),
+  admin_fees: (c) => adminFees(c),         // hourly schedule (0028)
   test_attach_card: testAttachCard,
   card_config: cardConfig,                // public (booking form)
   apply_branding: applyBranding,          // FixFlow (staff)
