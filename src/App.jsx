@@ -242,6 +242,7 @@ const STATUS_C = {
   "Scheduled":     {bg:"rgba(45,212,191,0.15)",  t:"#2dd4bf", dot:"#2dd4bf"},
   "Parts Awaited": {bg:"rgba(192,132,252,0.15)", t:"#c084fc", dot:"#c084fc"},
   "In Progress":   {bg:"rgba(251,146,60,0.15)",  t:"#fb923c", dot:"#fb923c"},
+  "Awaiting Payment":{bg:"rgba(244,114,182,0.15)",t:"#f472b6", dot:"#f472b6"}, // display-only, see displayStatus
   "Completed":     {bg:"rgba(74,222,128,0.15)",  t:"#4ade80", dot:"#4ade80"},
   "Beyond Repair": {bg:"rgba(74,222,128,0.15)",  t:"#4ade80", dot:"#4ade80"}, // shown as "Completed: BER"
   "Cancelled":     {bg:"rgba(239,68,68,0.15)",   t:"#ef4444", dot:"#ef4444"},
@@ -364,10 +365,16 @@ const CallLink = ({phone,style}) => {
   );
 };
 
-// "Scheduled" is display-only: an Assigned job that has a visit date shows as
-// Scheduled. The saved status stays "Assigned", so the Portal, Edge Functions
-// and payout logic are unaffected.
-const displayStatus = j => (j.status==="Assigned"&&j.scheduledDate) ? "Scheduled" : j.status;
+// "Scheduled" and "Awaiting Payment" are display-only, so the Portal, Edge
+// Functions and payout logic are unaffected:
+//  - Awaiting Payment: a payment link has been sent (Take Payment in the
+//    Portal, or the external SP payment panel) and the customer hasn't paid
+//    yet. Same rule as the Portal's isAwaitingPayment(). The job completes by
+//    itself once paid (markJobPaid applies pending_outcome).
+//  - Scheduled: an Assigned job that has a visit date.
+// The saved status stays as it was (usually "Assigned").
+const isAwaitingPayment = j => !!j.pendingOutcome && j.paymentStatus==="outstanding" && !["Completed","Beyond Repair","Cancelled","Quote"].includes(j.status);
+const displayStatus = j => isAwaitingPayment(j) ? "Awaiting Payment" : (j.status==="Assigned"&&j.scheduledDate) ? "Scheduled" : j.status;
 // ── NEEDS ATTENTION ──────────────────────────────────────────────────────────
 // Bookings that need attention (see src/attention.js) get a glowing status
 // pill with a pulsing dot. The map of bookingId -> {since, reasons} is built
@@ -1070,6 +1077,7 @@ function JobStepper({job}){
   const sub = quote ? "Quote — not booked yet"
     : cancelled ? `Cancelled at ${stepName(step-1)}`
     : done ? (paid?"Paid":"Awaiting payment")
+    : isAwaitingPayment(job) ? "Awaiting payment — completes once paid"
     : step===4&&job.status==="Parts Awaited" ? "Waiting on parts"
     : `Next: ${stepName(step)}`;
   const on = cancelled ? C.light : done ? C.success : C.primary;
@@ -4439,7 +4447,7 @@ export default function App() {
               </div>
               <div style={{display:"flex",gap:9,marginBottom:12,flexWrap:"wrap"}}>
                 <input style={{...inp,maxWidth:210}} placeholder="Name / address / brand / ref / #ID" value={fsSearch} onChange={e=>setFsSearch(e.target.value)}/>
-                <select style={{...inp,maxWidth:155}} value={fsStatus} onChange={e=>setFsStatus(e.target.value)}><option value="NotCancelled">All except Cancelled</option><option value="All">All Statuses</option>{STATUSES.filter(s=>s!=="Quote").flatMap(s=>s==="Assigned"?["Assigned","Scheduled"]:[s]).map(s=><option key={s} value={s}>{statusLabel(s)}</option>)}</select>
+                <select style={{...inp,maxWidth:155}} value={fsStatus} onChange={e=>setFsStatus(e.target.value)}><option value="NotCancelled">All except Cancelled</option><option value="All">All Statuses</option>{STATUSES.filter(s=>s!=="Quote").flatMap(s=>s==="Assigned"?["Assigned","Scheduled"]:s==="In Progress"?["In Progress","Awaiting Payment"]:[s]).map(s=><option key={s} value={s}>{statusLabel(s)}</option>)}</select>
                 <select style={{...inp,maxWidth:235,borderColor:fsOrder!=="newest"?C.primary:undefined}} value={fsOrder} onChange={e=>setFsOrder(e.target.value)} title="Needs-attention bookings have a glowing status pill with a pulsing dot" aria-label="Order">
                   <option value="attention">Pulsating records shown first{attentionCount?` (${attentionCount})`:""}</option>
                   <option value="attentionOnly">Pulsating records only{attentionCount?` (${attentionCount})`:""}</option>
