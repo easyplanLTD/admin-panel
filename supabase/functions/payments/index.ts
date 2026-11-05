@@ -731,7 +731,7 @@ async function takePayment(c: Caller, body: any) {
   let b = await booking(body.bookingId);
   requireStaffOrJobEngineer(c, b);
   requireLive(s, c, b);
-  const outcome = body.outcome === "Beyond Repair" ? "Beyond Repair" : body.outcome === "Completed" ? "Completed" : fail("Choose Repaired or BER.");
+  const outcome = body.outcome === "Beyond Repair" ? "Beyond Repair" : body.outcome === "Completed" ? "Completed" : fail("Choose Repaired (Completed) or Beyond Economical Repair (Completed: BER).");
   if (["Completed", "Beyond Repair", "Cancelled"].includes(b.status)) fail("This job is already closed.");
   if (["paid", "processing", "refunded", "part_refunded"].includes(b.payment_status)) fail("This job has already been paid.");
   if (outcome === "Completed" && b.parts_approval_status === "pending") fail("The customer needs to approve the parts first.");
@@ -855,6 +855,101 @@ async function sendExternalLink(c: Caller, body: any) {
   };
   const anyOk = sent.sms === true || sent.email === true;
   return { url, totalPence: m.total, sent, ...(anyOk ? {} : { error: `${lastSendError || "Nothing was sent."} Copy the link and send it another way.` }) };
+}
+
+// External SP job paid outside the payment link: a card payment taken by hand
+// in the Stripe dashboard (paymentIntentId) or a bank transfer. Records the
+// amounts, the payment, the SP's payout as owed, the outcome and the
+// engineer's assessment (outcome_report) in one go, as markJobPaid would.
+//   method: "stripe" | "bank_transfer"
+//   paymentIntentId: "pi_..." (stripe), paidOn: "YYYY-MM-DD" (bank transfer)
+//   calloutPence, partsPence, partsDescription, labourPence, labourDescription,
+//   spPayoutPence, outcome: "Completed" | "Beyond Repair", assessment
+async function recordManualPayment(c: Caller, body: any) {
+  requireStaff(c);
+  const b = await booking(body.bookingId);
+  if (!b.is_external) fail("This is only for external SP jobs.");
+  if (b.status === "Cancelled") fail("This job is cancelled.");
+  if (["paid", "processing", "refunded", "part_refunded", "disputed"].includes(b.payment_status)) fail("This job has already been paid.");
+  const pence = (v: unknown, what: string, required = false) => {
+    if (v === "" || v == null) return required ? fail(`Enter the ${what}.`) : 0;
+    const n = Math.round(Number(v));
+    if (!Number.isFinite(n) || n < 0) fail(`The ${what} isn't a valid amount.`);
+    return n;
+  };
+  const callout = pence(body.calloutPence, "call-out fee", true);
+  const parts = pence(body.partsPence, "parts amount");
+  const labour = pence(body.labourPence, "labour amount");
+  const payout = pence(body.spPayoutPence, "amount owed to the SP");
+  const outcome = body.outcome === "Beyond Repair" ? "Beyond Repair" : "Completed";
+  const assessment = String(body.assessment || "").trim().slice(0, 4000);
+  const partsDescription = String(body.partsDescription || "").trim().slice(0, 200) || null;
+  const labourDescription = labour ? (String(body.labourDescription || "").trim().slice(0, 200) || null) : null;
+
+  const nb = { ...b, ext_callout_pence: callout, ext_parts_pence: parts, ext_labour_pence: labour, sp_payout_pence: payout, pending_outcome: outcome };
+  const m = externalCharge(nb);
+  if (m.total <= 0) fail("The total must be more than £0.");
+  if (payout > m.total) fail("The SP payout can't be more than the customer paid.");
+
+  const now = new Date().toISOString();
+  let pay: Record<string, unknown>;
+  if (body.method === "stripe") {
+    const id = String(body.paymentIntentId || "").trim();
+    if (!/^pi_[A-Za-z0-9]+$/.test(id)) fail("Paste the Stripe payment reference, it starts with pi_.");
+    const { data: used } = await db.from("bookings").select("booking_ref").eq("stripe_payment_intent_id", id).neq("id", b.id).maybeSingle();
+    if (used) fail(`That Stripe payment is already recorded on ${used.booking_ref || "another job"}.`);
+    // Real bookings were taken on the live account; try the other one too in case.
+    const clients = [externalClient(b), ...(stripeLive ? [stripeLive, stripe] : [stripe])].filter((x, i, a) => a.indexOf(x) === i);
+    let pi: Stripe.PaymentIntent | null = null, client: Stripe | null = null;
+    for (const cl of clients) {
+      try { pi = await cl.paymentIntents.retrieve(id, { expand: ["latest_charge.balance_transaction"] }); client = cl; break; } catch (_) { /* try the next account */ }
+    }
+    if (!pi || !client) fail("Stripe couldn't find that payment. Check the pi_ reference.");
+    if (pi!.status !== "succeeded") fail(`That Stripe payment hasn't succeeded (it's ${pi!.status}).`);
+    if (pi!.currency !== "gbp") fail("That Stripe payment isn't in pounds.");
+    if (pi!.amount !== m.total) fail(`That Stripe payment was ${gbp(pi!.amount)}, but the amounts entered add up to ${gbp(m.total)}${m.parts === 0 && parts > 0 ? " (parts aren't charged on a beyond-repair job)" : ""}${m.adminFee ? ` (including the ${gbp(m.adminFee)} admin fee)` : ""}.`);
+    const charge = pi!.latest_charge as Stripe.Charge | null;
+    const bt = (charge?.balance_transaction || null) as Stripe.BalanceTransaction | null;
+    const fee = bt ? (bt.fee_details || []).filter((d) => d.type === "stripe_fee" || d.type === "tax").reduce((t, d) => t + d.amount, 0) : estimateStripeFee(pi!.amount);
+    const card: any = (charge as any)?.payment_method_details?.card || null;
+    // Tie the Stripe payment to the job, so it shows the job in Stripe too.
+    try { await client!.paymentIntents.update(pi!.id, { metadata: { booking_id: b.id, booking_ref: b.booking_ref || "", kind: "external_job", recorded_manually: "true" } }); } catch (_) { /* not essential */ }
+    pay = {
+      paid_via: "online", card_brand: card?.brand || null, card_last4: card?.last4 || null,
+      stripe_livemode: !!pi!.livemode, stripe_dashboard_url: await dashboardUrl(pi!, null),
+      stripe_payment_intent_id: pi!.id, stripe_charge_account_id: null, stripe_fee_pence: fee,
+      paid_at: new Date((pi!.created || Date.now() / 1000) * 1000).toISOString(),
+    };
+  } else if (body.method === "bank_transfer") {
+    const d = String(body.paidOn || "").trim();
+    if (d && !/^\d{4}-\d{2}-\d{2}$/.test(d)) fail("Enter the date the transfer arrived.");
+    pay = {
+      paid_via: "bank_transfer", card_brand: null, card_last4: null, stripe_livemode: null, stripe_dashboard_url: null,
+      stripe_payment_intent_id: null, stripe_charge_account_id: null, stripe_fee_pence: 0,
+      paid_at: d ? `${d}T12:00:00Z` : now,
+    };
+  } else {
+    fail("Choose how the customer paid.");
+  }
+
+  const closed = ["Completed", "Beyond Repair"].includes(b.status);
+  await updateBooking(b.id, {
+    ext_callout_pence: callout, ext_parts_pence: parts, ext_parts_description: partsDescription,
+    ext_labour_pence: labour || null, ext_labour_description: labourDescription,
+    ...(parts > 0 && b.parts_approval_status !== "approved"
+      ? { parts_approval_status: "approved", parts_approved_at: now, parts_approval_method: "Agreed with the customer by phone (external SP job)" } : {}),
+    sp_payout_pence: payout, sp_payout_status: payout > 0 ? "owed" : null,
+    total_pence: m.total, commission_pence: m.commission, engineer_share_pence: m.engineerShare,
+    ...pay!,
+    payment_status: "paid", payment_taken: true, payment_taken_at: now,
+    awaiting_payment_since: null, uncollectable_at: null,
+    ...(assessment ? { outcome_report: assessment, outcome_report_at: now } : {}),
+    pending_outcome: outcome,
+    // Same as a link payment: the job closes with the chosen outcome (this also
+    // sends the customer the usual job-completed message with the assessment).
+    ...(closed ? {} : { status: outcome, completed_date: String(pay!.paid_at).slice(0, 10) }),
+  });
+  return { ok: true, totalPence: m.total };
 }
 
 // Called by the Portal (or FixFlow) as soon as a job is marked completed.
@@ -1477,6 +1572,7 @@ const ACTIONS: Record<string, (c: Caller, body: any) => Promise<unknown>> = {
   send_payment_link: sendPaymentLink,
   apply_admin_fee: applyAdminFee,
   send_external_link: sendExternalLink,   // FixFlow (staff): external SP jobs
+  record_manual_payment: recordManualPayment, // FixFlow (staff): external SP job paid by hand / bank transfer
   send_parts_approval: sendPartsApproval,
   parts_quote: partsQuote,                // public (approval page)
   parts_respond: partsRespond,            // public (approval page)
