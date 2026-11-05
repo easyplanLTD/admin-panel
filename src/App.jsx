@@ -1072,13 +1072,17 @@ function buildJobFeed(job, remote, eng){
 // Where the job is in its life, worked out from what's actually on the
 // booking (not status alone, so a job edited out of order still lands on
 // the right step): Booked -> Assigned -> Scheduled -> In Progress ->
-// Completed (or "Completed: BER"). "In Progress" also covers Parts Awaited. Quotes sit before step 1;
+// Awaiting Payment -> Completed (or "Completed: BER"). "In Progress" also
+// covers Parts Awaited (and is labelled that way when it applies). Quotes sit before step 1;
 // cancelled jobs show the step they'd reached, greyed out.
-const JOB_STEPS = ["Booked","Assigned","Scheduled","In Progress","Completed"];
+// Awaiting Payment sits between In Progress and Completed: a payment link has
+// been sent and the job completes by itself once the customer pays.
+const JOB_STEPS = ["Booked","Assigned","Scheduled","In Progress","Awaiting Payment","Completed"];
 function jobStep(job){
   const done = job.status==="Completed"||job.status==="Beyond Repair";
-  if(done) return 5;
-  if(job.status==="In Progress"||job.status==="Parts Awaited"||isAwaitingPayment(job)) return 4;
+  if(done) return 6;
+  if(isAwaitingPayment(job)) return 5;
+  if(job.status==="In Progress"||job.status==="Parts Awaited") return 4;
   if(job.scheduledDate&&visitStarted(job)) return 4;
   if(job.scheduledDate) return 3;
   if(job.engineerId||job.isExternal) return 2;
@@ -1090,12 +1094,13 @@ function JobStepper({job}){
   const n = JOB_STEPS.length;
   const done = step===n;
   const ber = job.status==="Beyond Repair";
-  const stepName = i => i===n-1&&ber ? "Completed: BER" : JOB_STEPS[i];
+  const stepName = i => i===n-1&&ber ? "Completed: BER"
+    : i===3&&job.status==="Parts Awaited" ? "Parts Awaited" : JOB_STEPS[i];
   const paid = job.paymentStatus==="paid"||job.paymentTaken;
   const sub = quote ? "Quote — not booked yet"
     : cancelled ? `Cancelled at ${stepName(step-1)}`
     : done ? (paid?"Paid":"Awaiting payment")
-    : isAwaitingPayment(job) ? "Awaiting payment — completes once paid"
+    : isAwaitingPayment(job) ? "Completes once paid"
     : step===4&&job.status==="Parts Awaited" ? "Waiting on parts"
     : `Next: ${stepName(step)}`;
   const on = cancelled ? C.light : done ? C.success : C.primary;
