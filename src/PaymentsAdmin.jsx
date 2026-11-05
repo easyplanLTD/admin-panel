@@ -795,6 +795,9 @@ function ExternalJobPaymentPanel({ job, settings, onChanged }) {
     return init;
   });
   const [payRef, setPayRef] = useState(job.spPayoutRef || "");
+  // Payment already taken outside the link (card by phone in Stripe, or bank transfer).
+  const [rec, setRec] = useState({ open: false, method: "stripe", pi: "", paidOn: new Date().toISOString().slice(0, 10), assessment: job.outcomeReport || "" });
+  const setR = (k) => (v) => setRec((x) => ({ ...x, [k]: v }));
   const [busy, setBusy] = useState("");
   const [err, setErr] = useState("");
   const [msg, setMsg] = useState("");
@@ -837,6 +840,25 @@ function ExternalJobPaymentPanel({ job, settings, onChanged }) {
         setMsg(`Link for ${penceToGBP(r.totalPence)} ${parts} to the customer${failed ? ` (the ${failed} failed)` : ""}. It's also copied to the clipboard.`);
       }
       await onChanged?.();
+    } catch (e) { setErr(e.message); }
+    setBusy("");
+  };
+  const recordPaid = async () => {
+    setErr(""); setMsg("");
+    if (f.callout === "") { setErr("Enter the call-out fee."); return; }
+    if (rec.method === "stripe" && !/^pi_\w+$/.test(rec.pi.trim())) { setErr("Paste the Stripe payment reference (it starts with pi_). It's on the payment's page in Stripe, under Payment ID."); return; }
+    if (!rec.assessment.trim() && !window.confirm("No engineer's assessment entered. Record the payment without one?")) return;
+    setBusy("record");
+    try {
+      const r = await callPayments("record_manual_payment", {
+        bookingId: job.id, method: rec.method, paymentIntentId: rec.pi.trim(), paidOn: rec.paidOn,
+        calloutPence: calloutP, partsPence: partsP, partsDescription: f.partsDescription,
+        labourPence: labourP, labourDescription: f.labourDescription,
+        spPayoutPence: payoutP, outcome: closed ? (job.status === "Beyond Repair" ? "Beyond Repair" : "Completed") : f.outcome,
+        assessment: rec.assessment,
+      });
+      if (r?.error) setErr(r.error);
+      else { setMsg(`Recorded: customer paid ${penceToGBP(r.totalPence)}${payoutP > 0 ? `, ${penceToGBP(payoutP)} owed to the SP` : ""}.`); setRec((x) => ({ ...x, open: false })); await onChanged?.(); }
     } catch (e) { setErr(e.message); }
     setBusy("");
   };
@@ -931,6 +953,43 @@ function ExternalJobPaymentPanel({ job, settings, onChanged }) {
           </div>
           <Btn sm disabled={!!busy || !live} onClick={send}>{busy === "send" ? "Sending…" : hasAmounts ? "Update amounts & resend link" : "Generate & send payment link"}</Btn>
           {!live && <NotLiveNote />}
+
+          {/* Payment already taken another way */}
+          <div style={{ marginTop: 14, paddingTop: 12, borderTop: `1px dashed ${C.border}` }}>
+            {!rec.open ? (
+              <Btn variant="ghost" sm disabled={!!busy} onClick={() => setRec((x) => ({ ...x, open: true }))}>Payment already taken? Record it…</Btn>
+            ) : (
+              <div>
+                <div style={label()}>Record a payment taken outside the link</div>
+                <div style={{ fontSize: 12, color: C.mid, marginBottom: 8 }}>Uses the call-out, parts, labour, SP and outcome above. No link is sent.</div>
+                <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(200px,1fr))", gap: 10 }}>
+                  <Fl label="How the customer paid">
+                    <select style={inp} value={rec.method} onChange={(e) => setR("method")(e.target.value)}>
+                      <option value="stripe">Card, taken by hand in Stripe</option>
+                      <option value="bank_transfer">Bank transfer</option>
+                    </select>
+                  </Fl>
+                  {rec.method === "stripe"
+                    ? <Fl label="Stripe payment reference (pi_…)"><input style={inp} value={rec.pi} onChange={(e) => setR("pi")(e.target.value)} placeholder="pi_3…" /></Fl>
+                    : <Fl label="Date the transfer arrived"><input type="date" style={inp} value={rec.paidOn} onChange={(e) => setR("paidOn")(e.target.value)} /></Fl>}
+                </div>
+                <Fl label="Engineer's assessment (shown on the job as the outcome report)">
+                  <textarea style={{ ...ta, minHeight: 80 }} value={rec.assessment} maxLength={4000} onChange={(e) => setR("assessment")(e.target.value)} placeholder="What the engineer found and did" />
+                </Fl>
+                <div style={{ fontSize: 12, color: C.mid, margin: "2px 0 10px" }}>
+                  {rec.method === "stripe" ? "FixFlow checks the Stripe payment matches " : "Records "}
+                  <b style={{ color: C.text }}>{penceToGBP(calloutP + (f.outcome === "Beyond Repair" && !closed ? 0 : partsP) + labourP)}</b>
+                  {rec.method === "stripe" ? ", then fills in the card and Stripe fee." : " paid by bank transfer (no Stripe fee)."}
+                  {" "}The SP is shown as owed {penceToGBP(payoutP)}.
+                  {!closed && " The job closes as " + (f.outcome === "Beyond Repair" ? "Beyond repair" : "Repaired") + " and the customer gets the usual job-completed message."}
+                </div>
+                <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+                  <Btn variant="success" sm disabled={!!busy} onClick={recordPaid}>{busy === "record" ? "Recording…" : "Record payment"}</Btn>
+                  <Btn variant="ghost" sm disabled={!!busy} onClick={() => setRec((x) => ({ ...x, open: false }))}>Cancel</Btn>
+                </div>
+              </div>
+            )}
+          </div>
         </div>
       )}
 
