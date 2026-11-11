@@ -1,3 +1,8 @@
 @tailwind base;
 @tailwind components;
 @tailwind utilities;
+
+/* Admin / More group tab bar: scrolls sideways on phones and narrow tablets
+   without showing a scrollbar track under the tabs. */
+.er-tabscroll { scrollbar-width: none; -ms-overflow-style: none; -webkit-overflow-scrolling: touch; }
+.er-tabscroll::-webkit-scrollbar { display: none; }
