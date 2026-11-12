@@ -1656,3 +1656,120 @@ function PlanCancelModal({ plan, fee, onClose, onSave }) {
 }
 
 export { penceToGBP };
+
+// ═══════════════════════════════════════════════════════════════════════════
+//  PROFIT (More -> Profit) -- what EasyRepair actually kept on each completed
+//  job (Completed + Beyond Repair), newest first. Uses the same jobMoney()
+//  maths as the "EasyRepair keeps" line in a job's payment panel, so the two
+//  always agree:
+//    in-house SP job: commission - Stripe fee (unless the engineer pays it)
+//                     + EasyRepair's share of any late-payment admin fee
+//                     - commission refunded
+//    external SP job: customer paid - SP payout - Stripe fee - refunds
+//  Jobs the customer hasn't paid for yet show an estimate, marked as such.
+//  Test bookings are left out.
+// ═══════════════════════════════════════════════════════════════════════════
+const PROFIT_RANGES = [{ id: "7", label: "7 days", days: 7 }, { id: "30", label: "30 days", days: 30 }, { id: "90", label: "90 days", days: 90 }, { id: "all", label: "All time", days: null }];
+const PAID_STATES = ["paid", "part_refunded", "refunded"];
+export function jobProfit(job, settings, overrides = []) {
+  const m = jobMoney(job, settings, overrides);
+  const ext = !!m.external;
+  const paid = PAID_STATES.includes(job.paymentStatus);
+  const adminFee = !ext && job.adminFeeAppliedAt && paid
+    ? Math.round(Number(job.adminFeePence || 0) * (100 - Number(mergeSettings(settings).admin_fee_engineer_share || 0)) / 100) : 0;
+  const refunded = ext ? Number(job.refundAmountPence || 0) : Number(job.commissionRefundedPence || 0);
+  return {
+    revenue: m.total + adminFee - (ext ? refunded : 0),
+    sp: m.engineerNet,
+    fee: m.engineerPaysFee ? 0 : m.fee,
+    adminFee, refunded,
+    profit: m.easyRepairNet + adminFee - refunded,
+    estimate: !paid,
+    external: ext,
+  };
+}
+
+export function ProfitView({ jobs = [], engineers = [], onOpenJob }) {
+  const { settings, loaded } = usePaymentSettings();
+  const { rows: overrides } = useTable("payment_overrides", { order: "created_at" });
+  const [range, setRange] = useState("30");
+  const [paidOnly, setPaidOnly] = useState(false);
+  const r = PROFIT_RANGES.find((x) => x.id === range) || PROFIT_RANGES[1];
+
+  const rows = useMemo(() => {
+    if (!loaded) return [];
+    const now = new Date();
+    const start = r.days ? new Date(now.getFullYear(), now.getMonth(), now.getDate() - (r.days - 1)) : null;
+    const doneOn = (j) => j.completedDate || j.paidAt || j.createdAt;
+    return jobs
+      .filter((j) => !j.isTest && ["Completed", "Beyond Repair"].includes(j.status))
+      .map((j) => ({ job: j, date: doneOn(j), ...jobProfit(j, settings, overrides) }))
+      .filter((x) => (!start || (x.date && new Date(x.date) >= start)) && (!paidOnly || !x.estimate))
+      .sort((a, b) => new Date(b.date || 0) - new Date(a.date || 0));
+  }, [jobs, settings, overrides, loaded, r, paidOnly]);
+
+  if (!loaded) return null;
+  const sum = (k) => rows.reduce((s, x) => s + x[k], 0);
+  const total = sum("profit");
+  const estCount = rows.filter((x) => x.estimate).length;
+  const spName = (j) => j.isExternal ? (j.externalName || "External SP") : (engineers.find((e) => e.id === j.engineerId)?.name || "Unassigned");
+  const fmtDay = (d) => d ? new Date(String(d).length === 10 ? `${d}T12:00:00` : d).toLocaleDateString("en-GB", { day: "numeric", month: "short", year: "numeric" }) : "—";
+  const pill = (active) => ({ border: active ? "none" : `1.5px solid ${C.border}`, borderRadius: 20, padding: "6px 14px", fontSize: 12, fontWeight: 800, cursor: "pointer", fontFamily: "inherit", background: active ? C.primary : "transparent", color: active ? "#000000" : C.mid, whiteSpace: "nowrap" });
+  const tile = (l, v, sub, color) => (
+    <div style={{ background: C.card, borderRadius: 11, padding: "12px 14px", borderLeft: `3px solid ${color}`, minWidth: 0 }}>
+      <div style={{ fontSize: 11, color: C.mid, fontWeight: 700 }}>{l}</div>
+      <div style={{ fontSize: 19, fontWeight: 900, color }}>{v}</div>
+      {sub && <div style={{ fontSize: 11, color: C.light }}>{sub}</div>}
+    </div>
+  );
+
+  return (
+    <div>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 16, flexWrap: "wrap", gap: 10 }}>
+        <div>
+          <h1 style={{ margin: 0, fontSize: 19, fontWeight: 900, color: C.text }}>Profit</h1>
+          <div style={{ color: C.light, fontSize: 12, marginTop: 1 }}>Completed and Beyond Repair jobs · by date completed · test bookings excluded</div>
+        </div>
+        <div className="er-tabscroll" style={{ display: "flex", gap: 6, overflowX: "auto", maxWidth: "100%" }}>
+          {PROFIT_RANGES.map((x) => <button key={x.id} onClick={() => setRange(x.id)} style={pill(range === x.id)}>{x.label}</button>)}
+        </div>
+      </div>
+
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(150px,1fr))", gap: 10, marginBottom: 12 }}>
+        {tile("Profit", penceToGBP(total), estCount ? `includes ${estCount} estimate${estCount === 1 ? "" : "s"}` : "all from paid jobs", total < 0 ? C.danger : C.purple)}
+        {tile("Jobs", rows.length, rows.length ? `${penceToGBP(Math.round(total / rows.length))} avg per job` : "—", C.primary)}
+        {tile("Customers paid", penceToGBP(sum("revenue")), null, C.success)}
+        {tile("Paid to SPs", penceToGBP(sum("sp")), null, C.blue)}
+        {tile("Card fees", penceToGBP(sum("fee")), null, C.light)}
+      </div>
+
+      <label style={{ display: "inline-flex", alignItems: "center", gap: 7, fontSize: 12, color: C.mid, marginBottom: 10, cursor: "pointer" }}>
+        <input type="checkbox" checked={paidOnly} onChange={(e) => setPaidOnly(e.target.checked)} /> Paid jobs only (hide estimates)
+      </label>
+
+      <div style={{ background: C.card, borderRadius: 11, border: `1px solid ${C.border}`, overflow: "hidden" }}>
+        {rows.length === 0 && <div style={{ padding: 14, color: C.light, fontSize: 13 }}>No completed jobs in this period.</div>}
+        {rows.map(({ job: j, date, revenue, sp, fee, adminFee, refunded, profit, estimate }) => (
+          <div key={j.id} onClick={() => onOpenJob?.(j)} style={{ padding: "10px 14px", borderBottom: `1px solid ${C.border}`, display: "flex", justifyContent: "space-between", alignItems: "center", cursor: "pointer", gap: 12 }}>
+            <div style={{ minWidth: 0 }}>
+              <div style={{ fontSize: 13, color: C.text, display: "flex", gap: 6, alignItems: "center", flexWrap: "wrap" }}>
+                <b>{jobRef(j)} {j.customer}</b>
+                {j.status === "Beyond Repair" && <Pill color={C.warn} bg={C.warnLight}>BER</Pill>}
+                {estimate && <Pill>Not paid yet · estimate</Pill>}
+              </div>
+              <div style={{ fontSize: 11, color: C.light, marginTop: 2 }}>
+                {fmtDay(date)} · {j.appliance || "Appliance"} · {spName(j)}
+              </div>
+              <div style={{ fontSize: 11, color: C.mid, marginTop: 2 }}>
+                Customer {penceToGBP(revenue)} − SP {penceToGBP(sp)} − card fee {penceToGBP(fee)}
+                {adminFee > 0 && ` + admin fee ${penceToGBP(adminFee)}`}
+                {refunded > 0 && ` · refunded ${penceToGBP(refunded)}`}
+              </div>
+            </div>
+            <div style={{ fontSize: 15, fontWeight: 900, color: profit < 0 ? C.danger : C.purple, whiteSpace: "nowrap", opacity: estimate ? 0.75 : 1 }}>{penceToGBP(profit)}</div>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}

@@ -1,6 +1,6 @@
 import { useState, useMemo, useEffect, useRef, useCallback, createContext, useContext } from "react";
 import { supabase } from "./lib/supabaseClient";
-import { PaymentsSettings, JobPaymentPanel, JobStatusActions, DisputesView, CustomerPaymentsPanel, SpPaymentsPanel, PlanBillingPanel, useOpenFlagsCount } from "./PaymentsAdmin";
+import { PaymentsSettings, JobPaymentPanel, JobStatusActions, DisputesView, CustomerPaymentsPanel, SpPaymentsPanel, PlanBillingPanel, useOpenFlagsCount, ProfitView } from "./PaymentsAdmin";
 import { mapPaymentFields, isStripeJob, spPayFor, spPayLabel, PAYMENT_STATUS_LABELS } from "./paymentsShared";
 import { ATTENTION_TRIGGERS, DEFAULT_ATTENTION_TRIGGERS, attentionFor, groupTimes, sortAttentionFirst } from "./attention";
 
@@ -542,6 +542,12 @@ const IconBarChart = ({size=18}) => ( // Analytics (tab inside More)
     <line x1="12" y1="20" x2="12" y2="10"/>
     <line x1="18" y1="20" x2="18" y2="4"/>
     <line x1="6" y1="20" x2="6" y2="16"/>
+  </svg>
+);
+const IconPound = ({size=18}) => ( // Profit (tab inside More)
+  <svg width={size} height={size} {...navIconBase}>
+    <path d="M17 7.5a4 4 0 0 0-7.5-1.5c-.6 1.2-.5 2.6-.2 4 .4 2 .2 4.5-1.8 6.5V18h10"/>
+    <line x1="7" y1="12" x2="14" y2="12"/>
   </svg>
 );
 const IconGear = ({size=18}) => ( // Settings
@@ -3723,7 +3729,7 @@ export default function App() {
   const [lastMoreView,setLastMoreView]   = useState("analytics");
   useEffect(()=>{
     if(["jobs","quotes","payments","serviceplans","engineers","disputes"].includes(view)) setLastAdminView(view);
-    else if(["analytics"].includes(view)) setLastMoreView(view);
+    else if(["analytics","profit"].includes(view)) setLastMoreView(view);
   },[view]);
   const [selJob,setSelJob]        = useState(null);
   const [editJob,setEditJob]      = useState(null);
@@ -4454,6 +4460,7 @@ export default function App() {
   ];
   const MORE_TABS = [
     {id:"analytics",label:"Analytics",Ic:IconBarChart},
+    {id:"profit",label:"Profit",Ic:IconPound},
   ];
   const tabViews = tabs => tabs.flatMap(t=>t.views||[t.id]);
   const ADMIN_VIEWS = tabViews(ADMIN_TABS), MORE_VIEWS = tabViews(MORE_TABS);
@@ -5123,6 +5130,7 @@ export default function App() {
           )}
 
           {view==="analytics"&&<AnalyticsView jobs={jobs} plans={plans}/>}
+          {view==="profit"&&<ProfitView jobs={jobs} engineers={engineers} onOpenJob={setSelJob}/>}
 
           {view==="disputes"&&<DisputesView jobs={jobs} engineers={engineers} onOpenJob={setSelJob}/>}
 
