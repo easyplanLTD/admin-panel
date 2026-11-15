@@ -793,9 +793,31 @@ async function applyAdminFee(c: Caller, body: any) {
   if (b.admin_fee_applied_at) fail("The admin fee has already been added.");
   if (b.payment_timing !== "after" && !isExternalPayable(b)) fail("The admin fee only applies to Pay after repair bookings and external SP payment links.");
   if (b.payment_status === "paid") fail("This job has already been paid.");
-  await updateBooking(b.id, { admin_fee_pence: s.admin_fee_pence, admin_fee_applied_at: new Date().toISOString() });
+  await updateBooking(b.id, { admin_fee_pence: s.admin_fee_pence, admin_fee_applied_at: new Date().toISOString(), admin_fee_waived: false });
   return await sendPaymentLinkFor({ ...b, admin_fee_pence: s.admin_fee_pence, admin_fee_applied_at: new Date().toISOString() },
     `As payment wasn't made within ${Number(s.admin_fee_grace_hours || 24)} hours of the job being completed, a ${gbp(s.admin_fee_pence)} admin fee has been added.`);
+}
+
+// Staff switch (FixFlow): take a late-payment admin fee off a job.
+//   mode "waive"   - remove any fee and stop the hourly run adding it to this job
+//   mode "restart" - remove any fee and restart the grace period from now
+//   mode "enable"  - switch the fee back on after a waive (grace period restarts)
+// With resend: true the customer gets a fresh link at the new total.
+async function removeAdminFee(c: Caller, body: any) {
+  requireStaff(c);
+  const b = await booking(body.bookingId);
+  if (b.payment_status === "paid") fail("This job has already been paid.");
+  const mode = String(body.mode || "");
+  if (!["waive", "restart", "enable"].includes(mode)) fail("Choose waive, restart or enable.");
+  const patch: Record<string, unknown> = mode === "waive"
+    ? { admin_fee_pence: 0, admin_fee_applied_at: null, admin_fee_waived: true }
+    : { admin_fee_pence: 0, admin_fee_applied_at: null, admin_fee_waived: false, awaiting_payment_since: new Date().toISOString() };
+  await updateBooking(b.id, patch);
+  const nb = { ...b, ...patch };
+  if (body.resend && mode !== "enable") {
+    return await sendPaymentLinkFor(nb, "The late payment admin fee has been removed.");
+  }
+  return { ok: true, mode, admin_fee_waived: nb.admin_fee_waived, awaiting_payment_since: nb.awaiting_payment_since };
 }
 
 // ─── External SP jobs (FixFlow) ──────────────────────────────────────────
@@ -1198,7 +1220,7 @@ async function applyDueAdminFees(c: Caller, s: any): Promise<number> {
   let unpaidQ = db.from("bookings").select("*")
     .or(externalOnly ? "and(is_external.eq.true,ext_callout_pence.not.is.null)" : "payment_timing.eq.after,and(is_external.eq.true,ext_callout_pence.not.is.null)")
     .eq("payment_status", "outstanding")
-    .is("admin_fee_applied_at", null).lte("awaiting_payment_since", cutoff);
+    .is("admin_fee_applied_at", null).eq("admin_fee_waived", false).lte("awaiting_payment_since", cutoff);
   if (externalOnly) unpaidQ = unpaidQ.eq("is_test", false);
   const { data: unpaid } = await unpaidQ;
   let n = 0;
@@ -1594,6 +1616,7 @@ const ACTIONS: Record<string, (c: Caller, body: any) => Promise<unknown>> = {
   charge_job: chargeJob,
   send_payment_link: sendPaymentLink,
   apply_admin_fee: applyAdminFee,
+  remove_admin_fee: removeAdminFee,
   send_external_link: sendExternalLink,   // FixFlow (staff): external SP jobs
   record_manual_payment: recordManualPayment, // FixFlow (staff): external SP job paid by hand / bank transfer
   send_parts_approval: sendPartsApproval,
