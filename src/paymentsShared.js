@@ -283,6 +283,7 @@ export function mapPaymentFields(row = {}) {
     hasSavedCard: !!row.stripe_payment_method_id,
     adminFeePence: row.admin_fee_pence ?? null,
     adminFeeAppliedAt: row.admin_fee_applied_at || null,
+    adminFeeWaived: !!row.admin_fee_waived,
     cancelledAt: row.cancelled_at || null,
     noShow: !!row.no_show,
     noShowAt: row.no_show_at || null,
