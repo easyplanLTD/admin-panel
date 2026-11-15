@@ -862,6 +862,20 @@ function ExternalJobPaymentPanel({ job, settings, onChanged }) {
     } catch (e) { setErr(e.message); }
     setBusy("");
   };
+  // Late-fee switch: "waive" stops the fee on this job, "restart" removes it and
+  // restarts the 24-hour clock, "enable" switches it back on (clock restarts).
+  const lateFee = async (mode, resend) => {
+    setBusy("fee"); setErr(""); setMsg("");
+    try {
+      const r = await callPayments("remove_admin_fee", { bookingId: job.id, mode, resend });
+      if (r?.error) throw new Error(r.error);
+      setMsg(mode === "enable" ? "Late fee switched back on. The 24-hour clock has restarted."
+        : mode === "waive" ? (resend ? "Late fee waived for this job and the link resent." : "Late fee waived for this job.")
+        : "Late fee removed, the 24-hour clock restarted and the link resent.");
+      await onChanged?.();
+    } catch (e) { setErr(e.message); }
+    setBusy("");
+  };
   const adminFee = async () => {
     setBusy("fee"); setErr(""); setMsg("");
     try { await callPayments("apply_admin_fee", { bookingId: job.id }); setMsg("Admin fee added and the link resent."); await onChanged?.(); }
@@ -1032,8 +1046,23 @@ function ExternalJobPaymentPanel({ job, settings, onChanged }) {
       )}
 
       <div style={{ display: "flex", gap: 6, marginTop: 14, flexWrap: "wrap" }}>
-        {job.paymentStatus === "outstanding" && hasAmounts && !job.adminFeeAppliedAt && (
+        {job.paymentStatus === "outstanding" && hasAmounts && !job.adminFeeAppliedAt && !job.adminFeeWaived && (
           <Btn variant="ghost" sm disabled={!!busy || !live} onClick={adminFee}>Add £{(settings.admin_fee_pence / 100).toFixed(2)} admin fee &amp; resend link</Btn>
+        )}
+        {job.paymentStatus === "outstanding" && hasAmounts && job.adminFeeAppliedAt && (
+          <>
+            <Btn variant="ghost" sm disabled={!!busy || !live} onClick={() => lateFee("restart", true)}>Remove late fee, restart 24h &amp; resend link</Btn>
+            <Btn variant="ghost" sm disabled={!!busy || !live} onClick={() => lateFee("waive", true)}>Waive late fee for this job &amp; resend link</Btn>
+          </>
+        )}
+        {job.paymentStatus === "outstanding" && hasAmounts && !job.adminFeeAppliedAt && !job.adminFeeWaived && (
+          <Btn variant="ghost" sm disabled={!!busy || !live} onClick={() => lateFee("waive", false)}>Waive late fee for this job</Btn>
+        )}
+        {job.paymentStatus === "outstanding" && hasAmounts && job.adminFeeWaived && (
+          <>
+            <span style={{ fontSize: 12, alignSelf: "center", opacity: 0.8 }}>Late fee waived for this job</span>
+            <Btn variant="ghost" sm disabled={!!busy || !live} onClick={() => lateFee("enable", false)}>Switch late fee back on</Btn>
+          </>
         )}
         {["paid", "part_refunded"].includes(job.paymentStatus) && job.paidVia !== "bank_transfer" && <Btn variant="ghost" sm onClick={() => setModal("refund")}>Refund…</Btn>}
       </div>
